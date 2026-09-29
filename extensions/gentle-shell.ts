@@ -1215,6 +1215,12 @@ function changesPollMs(env: NodeJS.ProcessEnv): number {
 	return positiveMs(env.GENTLE_PI_SHELL_CHANGES_POLL_MS, CHANGES_POLL_DEFAULT_MS);
 }
 
+// One bounded window per provider refresh: a credential lookup or fetch that
+// never answers must not hold the other providers — or the panel opening on
+// them — past it. Tunable (tests, slow networks); invalid values fall back.
+const USAGE_FETCH_TIMEOUT_DEFAULT_MS = 10_000;
+const usageFetchTimeoutMs = (env: NodeJS.ProcessEnv): number => positiveMs(env.GENTLE_PI_SHELL_USAGE_TIMEOUT_MS, USAGE_FETCH_TIMEOUT_DEFAULT_MS);
+
 function changesFingerprint(model: ChangesModel): string {
 	return [model.notice ?? "", ...model.files.map((file) => `${file.path}:${file.status}:${file.added}:${file.deleted}:${file.diffRevision ?? ""}:${file.countsUnavailable ?? ""}`)].join("|");
 }
@@ -1445,6 +1451,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	// One spelling of the config home, so the pin resolver, the global profiles
 	// store and the profile reader cannot drift onto two different stores.
 	const usageConfigHome = gentlePiConfigHome(env);
+	const usageFetchTimeout = usageFetchTimeoutMs(env);
 	// The subagent routing in force for this session: a repository pin first,
 	// then the global active profile. Only the profile's own role entries count;
 	// the reserved orchestrator key is not a route.
@@ -1475,42 +1482,93 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		usageScope = usageScopeFor(ctx);
 		return usageScope;
 	};
+	// One notification per settled provider — snapshot or failure — so the
+	// shell and the open overlay repaint immediately instead of waiting for
+	// the whole refresh, whose slowest member is the bounded window itself.
+	const notifyUsageSettled = () => {
+		renderHost?.invalidateSidebar?.();
+		renderHost?.requestRender();
+	};
+	// One bounded, self-contained refresh per provider. Providers run
+	// concurrently: a stalled credential lookup or fetch for one can never hold
+	// the others — or the overlay opening on them — past its own window.
+	const refreshProvider = async (ctx: ExtensionContext, provider: string, source: UsageSource | undefined, force: boolean, now: number): Promise<boolean> => {
+		if (!source && provider !== CODEX_PROVIDER && provider !== NAN_PROVIDER) return false;
+		if (!force && now - (usageFetchedAt.get(provider) ?? 0) < USAGE_REFRESH_MS) return false;
+		usageFetchedAt.set(provider, now);
+		const generation = (usageGenerations.get(provider) ?? 0) + 1;
+		usageGenerations.set(provider, generation);
+		// The window covers credential resolution and the fetch together. The
+		// abort signal reaches the underlying fetch through the wrapped fetchFn —
+		// built-ins and registered sources alike — so an expired provider is
+		// actually cancelled when its caller honors the signal. The race is the
+		// only path to state mutation: whatever the work resolves after the
+		// window expired is a value nobody reads, so a late answer — success or
+		// failure — cannot mutate anything.
+		const controller = new AbortController();
+		let expire: (() => void) | undefined;
+		const expired = new Promise<"timeout">((resolve) => { expire = () => resolve("timeout"); });
+		const timer = setTimeout(() => {
+			controller.abort();
+			expire?.();
+		}, usageFetchTimeout);
+		// The window's signal composes with whatever the caller already carries —
+		// init.signal, or a Request input's own signal — instead of replacing it:
+		// either side aborting still aborts, exactly like a plain fetch. With no
+		// caller signal the window's signal passes through unchanged.
+		const boundedFetch: typeof fetch = (input, init) => {
+			const callerSignal = init?.signal ?? (typeof Request !== "undefined" && input instanceof Request ? input.signal : undefined);
+			return deps.fetch(input, {
+				...init,
+				signal: callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal,
+			});
+		};
+		const work = (async () => {
+			const apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider).catch(() => undefined);
+			// The window may have expired while the credential was resolving: an
+			// aborted provider must not start its fetch at all.
+			if (controller.signal.aborted) return undefined;
+			return source
+				? fetchFromSource(source, apiKey, boundedFetch, deps.now())
+				: provider === NAN_PROVIDER
+					? fetchNanUsage(apiKey, boundedFetch, deps.now())
+					: fetchCodexUsage(apiKey, boundedFetch, deps.now());
+		})();
+		// The race's loser still runs to completion in the background: guard it so
+		// its rejection (a foreign source escaping its own catch) can never
+		// surface as unhandled, and clear the timer so nothing dangles.
+		const guarded = work.catch(() => undefined);
+		const settled = await Promise.race([guarded, expired]);
+		clearTimeout(timer);
+		// Discard before any state mutation: a generation mismatch means a newer
+		// refresh for this provider was dispatched and owns the state, and a
+		// replaced source's answer belongs to neither. A late success must not
+		// overwrite the newer snapshot, and a late failure must not mark the
+		// provider failed after its replacement succeeded.
+		if (usageGenerations.get(provider) !== generation) return false;
+		if (source && usageSources.get(provider) !== source) return false;
+		if (settled === "timeout" || !settled) {
+			usageFailures.add(provider);
+			notifyUsageSettled();
+			return false;
+		}
+		usage.record(settled);
+		usageFailures.delete(provider);
+		notifyUsageSettled();
+		return true;
+	};
 	const refreshUsage = async (ctx: ExtensionContext, force: boolean, only?: string) => {
 		const scope = resolveUsageScope(ctx);
 		const now = deps.now();
-		let recorded = false;
-		for (const provider of scope) {
-			if (only !== undefined && provider !== only) continue;
-			const source = usageSources.get(provider);
-			if (!source && provider !== CODEX_PROVIDER && provider !== NAN_PROVIDER) continue;
-			if (!force && now - (usageFetchedAt.get(provider) ?? 0) < USAGE_REFRESH_MS) continue;
-			usageFetchedAt.set(provider, now);
-			const generation = (usageGenerations.get(provider) ?? 0) + 1;
-			usageGenerations.set(provider, generation);
-			const apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider).catch(() => undefined);
-			const fetched = source
-				? await fetchFromSource(source, apiKey, deps.fetch, deps.now())
-				: provider === NAN_PROVIDER
-					? await fetchNanUsage(apiKey, deps.fetch, deps.now())
-					: await fetchCodexUsage(apiKey, deps.fetch, deps.now());
-			// Discard before any state mutation: a generation mismatch means a
-			// newer refresh for this provider was dispatched and owns the state,
-			// and a replaced source's answer belongs to neither. A late success
-			// must not overwrite the newer snapshot, and a late failure must not
-			// mark the provider failed after its replacement succeeded.
-			if (usageGenerations.get(provider) !== generation) continue;
-			if (source && usageSources.get(provider) !== source) continue;
-			if (!fetched) {
-				usageFailures.add(provider);
-				continue;
-			}
-			usage.record(fetched);
-			usageFailures.delete(provider);
-			recorded = true;
-		}
-		if (!recorded) return;
-		renderHost?.invalidateSidebar?.();
-		renderHost?.requestRender();
+		// Concurrent per provider; each settle notifies the shell (and repaints
+		// the open overlay) on its own, so a fast provider never waits for the
+		// slowest one's window. A discarded late answer notifies nothing: the
+		// refresh that owns the state notifies at its own settle.
+		await Promise.all(
+			scope
+				.filter((provider) => only === undefined || provider === only)
+				.map((provider) => refreshProvider(ctx, provider, usageSources.get(provider), force, now)),
+		);
 	};
 	// Subscribed once, for the life of the extension: a registration can
 	// arrive before the first session_start (the owning extension's factory
@@ -1543,11 +1601,10 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		const hint = keyHint("app.tools.expand", options.expanded ? "collapse" : "expand");
 		return cardComponent({ title: "Gentle AI", subtitle: "review preflight", body, tone: CARD_TONE.INFO }, theme, { expanded: options.expanded, hint });
 	});
-	const openUsage = async (ctx: ExtensionContext) => {
-		await refreshUsage(ctx, true);
-		await ctx.ui.custom<null>(
-			(tui, theme, _keybindings, done) =>
-				new UsageView(usage, {
+	const openUsage = (ctx: ExtensionContext) =>
+		ctx.ui.custom<null>(
+			(tui, theme, _keybindings, done) => {
+				const view = new UsageView(usage, {
 					theme,
 					now: () => deps.now(),
 					active: () => (ctx.model ? { provider: ctx.model.provider } : undefined),
@@ -1556,10 +1613,15 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 					onClose: () => withOverlayRepaint(tui, done)(null),
 					requestRender: () => tui.requestRender(),
 					scope: () => ({ providers: usageScope, failed: new Set(usageFailures) }),
-				}),
+				});
+				// Open promptly: the panel draws whatever the store already holds
+				// while the forced refresh runs underneath it, and repaints when
+				// the refresh settles — answers, failures, or the bounded timeout.
+				view.refresh();
+				return view;
+			},
 			{ overlay: true, overlayOptions: { width: "70%", minWidth: 60, anchor: "center" } },
 		);
-	};
 	pi.registerCommand(USAGE_COMMAND_NAME, {
 		description: "Show subscription usage windows for the connected providers. Press r to refetch.",
 		handler: async (_args, ctx) => openUsage(ctx),

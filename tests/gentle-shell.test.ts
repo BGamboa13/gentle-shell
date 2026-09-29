@@ -5006,6 +5006,205 @@ test("the subscriptions panel shows targeted providers with no data and a generi
 	await opened;
 });
 
+// One stalled provider must not hold the panel hostage: refreshes run
+// concurrently per provider and each one is bounded, so the overlay opens
+// immediately, the healthy provider still lands its snapshot, the stalled one
+// degrades to the generic failure note when its window expires, and a late
+// answer can never mutate what the timeout already settled.
+test("a stalled provider times out without hanging the overlay, and a late answer cannot mutate", async (t) => {
+	const home = mkdtempSync(join(tmpdir(), "shell-usage-stall-"));
+	t.after(() => rmSync(home, { recursive: true, force: true }));
+	writeProfilesStore(home, { team: { reviewer: { model: "nan/glm5.3" } } }, "team");
+	const { pi, handlers, commands } = fakePi();
+	let stalledCalls = 0;
+	let releaseStalled: ((usage: unknown) => void) | undefined;
+	const acmePayload = {
+		provider: "acme-cloud",
+		plan: "Acme cloud",
+		limits: [{ name: "acme-cloud", windows: [{ label: "week", usedPercent: 40, windowSeconds: 604_800, resetAt: null }], limitReached: false }],
+		fetchedAt: 0,
+	};
+	const { fetchFn } = fakeFetch(NAN_QUOTA_PAYLOAD);
+	gentleShell(
+		pi,
+		{ GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off", GENTLE_PI_SHELL_USAGE_TIMEOUT_MS: "25" },
+		{ fetch: fetchFn, now: () => 1_788_600_000_000 },
+	);
+	pi.events.emit(USAGE_SOURCE_EVENT, {
+		schema: USAGE_SOURCE_SCHEMA,
+		provider: "acme-cloud",
+		fetch: async () => {
+			stalledCalls += 1;
+			return await new Promise((resolve) => {
+				releaseStalled = () => resolve(acmePayload);
+			});
+		},
+	});
+	const { ctx, ui } = fakeContext({ token: "sk-nan-secret" });
+	(ctx as unknown as { model: { provider: string } }).model.provider = "acme-cloud";
+	await fire(handlers, "session_start", ctx);
+
+	// The stalled fetch is still pending, yet the panel opens right away and
+	// shows whatever the store already holds.
+	const opened = commands.get("gentle:usage")!.handler("", ctx);
+	await settle();
+	assert.ok(ui.overlayView, "the overlay must open while a provider is still stalled");
+	assert.match(ui.overlayView!.render(90).map(stripAnsi).find((line) => /^│ nan · updated just now/.test(line)) ?? "", /nan/, "the healthy provider's snapshot lands while the other provider is stalled");
+
+	// The stalled provider's window expires: its row wears the generic failure
+	// note, and it was still fetched — bounding, never skipping.
+	await new Promise((resolve) => setTimeout(resolve, 60));
+	await settle();
+	const plain = ui.overlayView!.render(90).map(stripAnsi);
+	assert.match(plain.find((line) => line.includes("acme-cloud")) ?? "", /acme-cloud · fetch failed · r to retry/, "the stalled provider degrades to the generic failure note");
+	assert.ok(stalledCalls >= 1, "the stalled provider was still fetched");
+
+	// An answer arriving after the timeout cannot mutate the settled state.
+	releaseStalled!(acmePayload);
+	await settle();
+	const late = ui.overlayView!.render(90).map(stripAnsi);
+	assert.match(late.find((line) => line.includes("acme-cloud")) ?? "", /fetch failed · r to retry/, "a late answer must not replace the timeout's failure note");
+	assert.doesNotMatch(late.join("\n"), /Acme cloud/, "a late answer must not record a snapshot");
+	ui.closeOverlay?.();
+	await opened;
+});
+
+// The fix for "healthy results record but nothing repaints until the slowest
+// timeout": each settled provider — snapshot or failure — notifies the shell
+// immediately, so the open overlay repaints per provider instead of waiting
+// for the whole refresh (whose slowest member is the bounded window itself).
+test("a settled provider repaints the overlay before the stalled provider's window expires", async (t) => {
+	const home = mkdtempSync(join(tmpdir(), "shell-usage-repaint-"));
+	t.after(() => rmSync(home, { recursive: true, force: true }));
+	writeProfilesStore(home, { team: { reviewer: { model: "nan/glm5.3" } } }, "team");
+	const { pi, handlers, commands } = fakePi();
+	let releaseNan: (() => void) | undefined;
+	const nanFetch = (async () => {
+		return await new Promise<Response>((resolve) => {
+			releaseNan = () => resolve({ ok: true, json: async () => NAN_QUOTA_PAYLOAD } as Response);
+		});
+	}) as typeof fetch;
+	gentleShell(
+		pi,
+		{ GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off", GENTLE_PI_SHELL_USAGE_TIMEOUT_MS: "100" },
+		{ fetch: nanFetch, now: () => 1_788_600_000_000 },
+	);
+	pi.events.emit(USAGE_SOURCE_EVENT, {
+		schema: USAGE_SOURCE_SCHEMA,
+		provider: "acme-cloud",
+		fetch: async () => await new Promise(() => {}),
+	});
+	const { ctx, ui } = fakeContext({ token: "sk-nan-secret" });
+	(ctx as unknown as { model: { provider: string } }).model.provider = "acme-cloud";
+	await fire(handlers, "session_start", ctx);
+	await settle();
+	// Arm the shell render host the way a real session does (the footer factory
+	// owns renderHost), then count frames from the shared fake TUI.
+	renderFooter(ui);
+	let frames = 0;
+	const originalRequestRender = fakeTui.requestRender;
+	fakeTui.requestRender = () => {
+		frames += 1;
+	};
+	try {
+		const opened = commands.get("gentle:usage")!.handler("", ctx);
+		await settle();
+		// Both providers are pending; releasing only the healthy one must repaint
+		// the overlay at once, with the refresh still in flight.
+		const framesBeforeRelease = frames;
+		releaseNan!();
+		await settle();
+		const lines = ui.overlayView!.render(90).map(stripAnsi);
+		assert.ok(frames > framesBeforeRelease, "the settled provider notifies the shell before the stalled window expires");
+		assert.match(lines.find((line) => /^│ nan · updated just now/.test(line)) ?? "", /nan/, "the healthy row is painted immediately on its own settle");
+		assert.match(lines[0], /refreshing…/, "the repaint is per settled provider — the refresh is still in flight");
+		// Only then does the stalled provider's window expire into the failure note.
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		await settle();
+		assert.match(ui.overlayView!.render(90).map(stripAnsi).find((line) => line.includes("acme-cloud")) ?? "", /fetch failed · r to retry/);
+		ui.closeOverlay?.();
+		await opened;
+	} finally {
+		fakeTui.requestRender = originalRequestRender;
+	}
+});
+
+// The window's signal must compose with whatever the caller already carries —
+// init.signal, like a source passing its own cancellation — not replace it:
+// either side aborting still aborts, exactly like a plain fetch.
+test("the refresh timeout composes with a source's own abort signal instead of replacing it", async (t) => {
+	const home = mkdtempSync(join(tmpdir(), "shell-usage-signal-"));
+	t.after(() => rmSync(home, { recursive: true, force: true }));
+	const { pi, handlers } = fakePi();
+	let captured: AbortSignal | undefined;
+	const spyFetch = (async (_input: string | URL, init?: RequestInit) => {
+		captured = (init?.signal ?? undefined) as AbortSignal | undefined;
+		return await new Promise<Response>(() => {});
+	}) as typeof fetch;
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off", GENTLE_PI_SHELL_USAGE_TIMEOUT_MS: "100" }, { fetch: spyFetch, now: () => 1_788_600_000_000 });
+	const hangingSource = (caller: AbortController): unknown => ({
+		schema: USAGE_SOURCE_SCHEMA,
+		provider: "acme-cloud",
+		fetch: async (_apiKey: string | undefined, fetchFn: typeof fetch) => {
+			await fetchFn("https://acme.example/usage", { signal: caller.signal });
+			return undefined;
+		},
+	});
+	const { ctx } = fakeContext({ token: "acme-token" });
+	(ctx as unknown as { model: { provider: string } }).model.provider = "acme-cloud";
+	const callerA = new AbortController();
+	pi.events.emit(USAGE_SOURCE_EVENT, hangingSource(callerA));
+	await fire(handlers, "session_start", ctx);
+	await settle();
+	assert.ok(captured, "the source's fetch reached the shell fetch");
+	assert.notEqual(captured, callerA.signal, "the window's signal composes with the caller's, it does not replace it");
+	callerA.abort();
+	assert.ok(captured!.aborted, "the caller's own abort still aborts the composed signal");
+
+	// A fresh, un-aborted caller must still be aborted by the window itself.
+	const callerB = new AbortController();
+	pi.events.emit(USAGE_SOURCE_EVENT, hangingSource(callerB));
+	await settle();
+	const capturedB = captured;
+	assert.ok(capturedB && !capturedB.aborted, "the second dispatch starts un-aborted");
+	await new Promise((resolve) => setTimeout(resolve, 250));
+	assert.ok(capturedB!.aborted, "the window's expiry aborts the composed signal too");
+});
+
+// A provider whose credential resolution outlives its window must never start
+// its fetch at all: the timeout bounds the whole operation, not just the wire.
+test("a provider aborted while its credential resolves never starts its fetch", async (t) => {
+	const home = mkdtempSync(join(tmpdir(), "shell-usage-credential-"));
+	t.after(() => rmSync(home, { recursive: true, force: true }));
+	const { pi, handlers } = fakePi();
+	let fetchCalls = 0;
+	const spyFetch = (async () => {
+		fetchCalls += 1;
+		return { ok: true, json: async () => ({}) } as Response;
+	}) as typeof fetch;
+	gentleShell(pi, { GENTLE_PI_CONFIG_HOME: home, GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off", GENTLE_PI_SHELL_USAGE_TIMEOUT_MS: "25" }, { fetch: spyFetch, now: () => 1_788_600_000_000 });
+	pi.events.emit(USAGE_SOURCE_EVENT, {
+		schema: USAGE_SOURCE_SCHEMA,
+		provider: "acme-cloud",
+		fetch: async () => {
+			fetchCalls += 1;
+			return undefined;
+		},
+	});
+	const { ctx } = fakeContext({ token: "acme-token" });
+	let releaseCredential: (() => void) | undefined;
+	(ctx as unknown as { modelRegistry: unknown }).modelRegistry = {
+		isUsingOAuth: () => true,
+		getApiKeyForProvider: () => new Promise<string | undefined>((resolve) => { releaseCredential = () => resolve("acme-token"); }),
+	};
+	(ctx as unknown as { model: { provider: string } }).model.provider = "acme-cloud";
+	await fire(handlers, "session_start", ctx);
+	await new Promise((resolve) => setTimeout(resolve, 60));
+	releaseCredential!();
+	await settle();
+	assert.equal(fetchCalls, 0, "the window expired during credential resolution; the source must never be invoked");
+});
+
 test("the panel keeps a headers-only subagent provider pending instead of a false failure", async (t) => {
 	const home = mkdtempSync(join(tmpdir(), "shell-usage-anthropic-"));
 	t.after(() => rmSync(home, { recursive: true, force: true }));
@@ -5159,7 +5358,7 @@ test("a replaced source's late failure cannot mark the provider failed after its
 	await opened;
 });
 
-test("a valid response-header snapshot clears a prior refresh failure", async (t) => {
+test("a valid response-header snapshot clears a prior refresh failure", async (_t) => {
 	const { pi, handlers, commands } = fakePi();
 	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { fetch: fakeFetch(USAGE_PAYLOAD, false).fetchFn, now: () => 1_788_600_000_000 });
 	const { ctx, ui } = fakeContext({ token: JWT });
@@ -5209,7 +5408,7 @@ test("the panel's scope is resolved on refresh, not on every render", async (t) 
 	await opened;
 });
 
-test("an older overlapping refresh cannot mark a provider failed after a newer one succeeded", async (t) => {
+test("an older overlapping refresh cannot mark a provider failed after a newer one succeeded", async (_t) => {
 	const { pi, handlers, commands } = fakePi();
 	let now = 1_788_600_000_000;
 	let codexCalls = 0;

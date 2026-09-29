@@ -84,8 +84,9 @@ export class UsageView {
 	// A failing usage fetch is the store's problem to report (its rows already
 	// carry the last error); the panel only clears its "refreshing" state. The
 	// rejection must never leave this method: an unhandled rejection is fatal
-	// to the whole shell on current Node.
-	private refresh(): void {
+	// to the whole shell on current Node. Public so the overlay can dispatch
+	// its opening refresh instead of making the open wait for it.
+	refresh(): void {
 		if (this.refreshing) return;
 		this.refreshing = true;
 		this.deps.requestRender();
