@@ -17,6 +17,7 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const { createGentleAiExtension } = await import(pathToFileURL(join(ROOT, "extensions/gentle-ai.ts")).href);
 const EXTENSIONS = [
 	"extensions/gentle-ai.ts",
+	"extensions/nan-provider.ts",
 	"extensions/quiet-tools.ts",
 	"extensions/skill-registry.ts",
 	"extensions/startup-banner.ts",
@@ -57,6 +58,7 @@ const FORBIDDEN_COMPAT_COMMANDS = [
 function createPi() {
 	const hooks = new Map();
 	const commands = new Map();
+	const providers = new Map();
 	const flags = new Map();
 	const tools = new Map();
 	const eventHandlers = new Map();
@@ -88,6 +90,9 @@ function createPi() {
 		},
 		registerCommand(name, definition) {
 			commands.set(name, definition);
+		},
+		registerProvider(name, config) {
+			providers.set(name, config);
 		},
 		registerFlag(name, definition) {
 			flags.set(name, definition);
@@ -121,7 +126,7 @@ function createPi() {
 		},
 	};
 
-	return { pi, hooks, commands, flags, tools, emittedEvents };
+	return { pi, hooks, commands, providers, flags, tools, emittedEvents };
 }
 
 function createUi() {
@@ -219,8 +224,9 @@ async function run() {
 	process.env.GENTLE_PI_TEST_ASSETS_DIR = ambientTestAssetsDir;
 	const globalModelsPath = join(globalConfigHome, "models.json");
 	const globalSubagentsPath = join(globalAgentHome, "subagents.json");
-	const { pi, hooks, commands, flags, tools, emittedEvents } = createPi();
+	const { pi, hooks, commands, providers, flags, tools, emittedEvents } = createPi();
 	await loadExtensions(pi);
+	assert.equal(providers.get("nan")?.api, "openai-completions", "runtime extension loading registers the NaN provider");
 
 	// gentle-pi#404: a collect binding that returns the native last-event
 	// closure must terminate after one capture. It must not re-enter a public
@@ -382,6 +388,10 @@ async function run() {
 		discovered.errors,
 		[],
 		"declared extension directory must load without invalid helper modules",
+	);
+	assert.ok(
+		discovered.extensions.some((extension) => extension.resolvedPath.endsWith(join("extensions", "nan-provider.ts"))),
+		"declared extension directory must discover the NaN provider",
 	);
 
 	// orchestrator-lazy-diet: Pi Subagent Model Routing detail (the "do not

@@ -268,6 +268,10 @@ pi
 
 See the [v3.5.1 release notes](https://github.com/Gentleman-Programming/gentle-shell/releases/tag/v3.5.1) for version-specific changes.
 
+### NaN model provider
+
+The first-party `nan` provider is included; no third-party provider package is required. Set `NAN_API_KEY` before starting Pi, or authenticate with `/login nan`, then use `/model` to select a model. Pi streams chat completions through its OpenAI-compatible provider. Model discovery intersects NaN's authenticated `/v1/models` response with a maintained subset of known chat IDs from the [official model documentation](https://nan.builders/docs/models); unknown and non-chat IDs are omitted. A successful response with no known chat IDs stays empty. Documented context, reasoning, and text/image capabilities are preserved with conservative numeric bounds for abbreviated limits; audio input is not advertised by Pi. Where NaN does not publish an output maximum, the provider configures a conservative 1,024-token cap rather than claiming the model's true limit. When discovery is unavailable, the offline baseline is only `deepseek-v4-flash` (or the last successful catalog for the same key); the baseline may not be available to every key. NaN MCP search and media bridges are not included.
+
 ```text
 /gentle:status
 /gentle:doctor
