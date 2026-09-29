@@ -35,8 +35,9 @@ const CHAT_MODELS: ProviderModelConfig[] = [
 	maxTokens: model.maxTokens ?? 8_192,
 }));
 
-// Offline discovery advertises only this known chat model, not the entire allowlist.
-const OFFLINE_MODELS = CHAT_MODELS.filter((model) => model.id === "deepseek-v4-flash");
+// The cold/offline baseline declares documented chat support, not key entitlement.
+// A successful live catalog remains authoritative for the credential that fetched it.
+const OFFLINE_MODELS = CHAT_MODELS;
 
 function cloneModel(model: ProviderModelConfig): ProviderModelConfig {
 	return { ...model, input: [...model.input], cost: { ...model.cost } };

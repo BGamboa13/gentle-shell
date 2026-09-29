@@ -19,6 +19,11 @@ function createNanProviderConfig(options: Parameters<typeof createNativeProvider
 	};
 }
 
+const DOCUMENTED_CHAT_IDS = [
+	"glm5.3", "deepseek-v4-flash", "glm5.3-flash", "qwen3.8-flash",
+	"mimo-v2.6-flash", "gemma4", "qwen3.6",
+];
+
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), {
 		status,
@@ -153,11 +158,11 @@ test("stale and aborted publication updates cannot replace the current key's cat
 					});
 				} else controller.abort();
 				publication.update?.();
-				assert.deepEqual(provider.getModels().map((model) => model.id), ["deepseek-v4-flash"]);
+				assert.deepEqual(provider.getModels().map((model) => model.id), DOCUMENTED_CHAT_IDS);
 				return false;
 			},
 		});
-		assert.deepEqual(provider.getModels().map((model) => model.id), ["deepseek-v4-flash"]);
+		assert.deepEqual(provider.getModels().map((model) => model.id), DOCUMENTED_CHAT_IDS);
 	}
 });
 
@@ -172,20 +177,40 @@ test("offline and already-aborted refreshes invalidate keys without publication"
 			allowNetwork: mode !== "offline", signal: controller.signal,
 			publish: async () => { assert.fail("refresh must not publish"); },
 		});
-		assert.deepEqual(provider.getModels().map((model) => model.id), ["deepseek-v4-flash"]);
+		assert.deepEqual(provider.getModels().map((model) => model.id), DOCUMENTED_CHAT_IDS);
 	}
 });
 
-test("offline baseline is one documented chat model with a configured output cap", () => {
-	const model = createNanProviderConfig().models?.[0];
+test("initial catalog contains all seven documented chat models with configured output caps", () => {
+	const models = createNanProviderConfig().models;
+	assert.deepEqual(models.map((model) => model.id), DOCUMENTED_CHAT_IDS);
+	const model = models.find((model) => model.id === "deepseek-v4-flash");
 	assert.equal(model?.id, "deepseek-v4-flash");
 	assert.equal(model?.api, "openai-completions");
 	assert.equal(model?.reasoning, true);
 	assert.deepEqual(model?.input, ["text", "image"]);
 	assert.equal(model?.contextWindow, 1_000_000);
-	assert.equal(createNanProviderConfig().models?.length, 1);
+	assert.equal(models.length, 7);
 	assert.equal(model?.maxTokens, 8_192);
 	assert.deepEqual(model?.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+});
+
+test("catalog snapshots cannot mutate the offline baseline or another provider", async () => {
+	const provider = createNativeProvider();
+	const snapshot = [...provider.getModels()];
+	snapshot[0].id = "mutated";
+	snapshot[0].input.push("image");
+	snapshot[0].cost.input = 99;
+	snapshot.pop();
+	const fresh = provider.getModels();
+	assert.deepEqual(fresh.map((model) => model.id), DOCUMENTED_CHAT_IDS);
+	assert.deepEqual(fresh[0].input, ["text"]);
+	assert.equal(fresh[0].cost.input, 0);
+	assert.deepEqual(createNativeProvider().getModels(), fresh);
+	await provider.refreshModels!({
+		...refreshContext({ type: "api_key", key: "changed-key" }), allowNetwork: false,
+	});
+	assert.deepEqual(provider.getModels(), fresh);
 });
 
 test("live discovery uses the key-scoped endpoint and replaces the fallback with listed models", async () => {
@@ -196,7 +221,7 @@ test("live discovery uses the key-scoped endpoint and replaces the fallback with
 			return jsonResponse({ data: [{ id: " glm5.3 " }, { id: "glm5.3" }, { id: "unknown-chat" }, { id: "embedding" }, { id: "image" }, { id: "speech" }, { id: "rerank" }] });
 		},
 	});
-	const fallbackId = config.models?.[0]?.id;
+	const fallbackId = "deepseek-v4-flash";
 	assert.ok(fallbackId);
 
 	const models = await config.refreshModels?.(refreshContext({ type: "api_key", key: "test-secret" }));
@@ -258,9 +283,12 @@ test("a successful empty key-scoped catalog does not restore offline fallback mo
 	const models = await config.refreshModels?.(refreshContext({ type: "api_key", key: "test-secret" }));
 
 	assert.deepEqual(models, []);
+	assert.deepEqual(await config.refreshModels({
+		...refreshContext({ type: "api_key", key: "test-secret" }), allowNetwork: false,
+	}), []);
 });
 
-test("failed or malformed discovery preserves the conservative baseline or last successful catalog", async () => {
+test("failed or malformed discovery preserves the documented baseline or last successful catalog", async () => {
 	const failingFetches: Array<typeof fetch> = [
 		async () => jsonResponse({ error: "unavailable" }, 503),
 		async () => new Response("not-json", { status: 200 }),
@@ -284,6 +312,9 @@ test("failed or malformed discovery preserves the conservative baseline or last 
 	const live = await config.refreshModels?.(refreshContext({ type: "api_key", key: "test-secret" }));
 	fail = true;
 	assert.deepEqual(await config.refreshModels?.(refreshContext({ type: "api_key", key: "test-secret" })), live);
+	assert.deepEqual(await config.refreshModels({
+		...refreshContext({ type: "api_key", key: "test-secret" }), allowNetwork: false,
+	}), live);
 });
 
 test("offline model refresh does not make a network request", async () => {
@@ -298,6 +329,12 @@ test("offline model refresh does not make a network request", async () => {
 	const models = await config.refreshModels?.({ ...context, allowNetwork: false });
 	assert.equal(calls, 0);
 	assert.deepEqual(models, config.models);
+	assert.deepEqual(models.map((model) => model.id), DOCUMENTED_CHAT_IDS);
+	const changed = await config.refreshModels({
+		...refreshContext({ type: "api_key", key: "different-key" }), allowNetwork: false,
+	});
+	assert.deepEqual(changed.map((model) => model.id), DOCUMENTED_CHAT_IDS);
+	assert.equal(calls, 0);
 });
 
 test("credential changes discard previous live models before failed, offline, or cancelled discovery", async () => {
