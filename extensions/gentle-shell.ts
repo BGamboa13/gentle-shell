@@ -3,7 +3,7 @@ import { Editor, decodeKittyPrintable, isKeyRelease, matchesKey, parseKey, trunc
 import { execFile, spawnSync } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { profilesFilePath, readProfilesFileResult } from "../lib/agent-profiles.ts";
+import { profilesFilePath, profileRoleEntries, readProfilesFileResult } from "../lib/agent-profiles.ts";
 import { resolveProfilePin } from "../lib/agent-profile-pin.ts";
 import * as os from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -107,7 +107,7 @@ import {
 	type DoubleEscCancelPolicy,
 	type DoubleEscCancelResolution,
 } from "../lib/double-esc-cancel-policy.ts";
-import { accountIdFromToken, CODEX_PROVIDER, CODEX_USAGE_URL, NAN_PROVIDER, NAN_QUOTA_URL, parseCodexUsage, parseNanQuota, parseProviderUsage, parseUsageHeaders, parseUsageSource, UsageSourceRegistry, UsageStore, USAGE_SOURCE_EVENT, type ProviderUsage, type UsageSource } from "../lib/shell-usage.ts";
+import { accountIdFromToken, CODEX_PROVIDER, CODEX_USAGE_URL, NAN_PROVIDER, NAN_QUOTA_URL, parseCodexUsage, parseNanQuota, parseProviderUsage, parseUsageHeaders, parseUsageSource, usageScopeProviders, UsageSourceRegistry, UsageStore, USAGE_SOURCE_EVENT, type ProviderUsage, type UsageSource } from "../lib/shell-usage.ts";
 import { UsageView } from "../lib/shell-usage-view.ts";
 import { sidebarHeader, sidebarPart, sidebarState, VISUAL_SETTINGS_CHANGED } from "../lib/shell-sidebar.ts";
 import { installSidebar, invalidateSidebar, narrowStatusOwner, STATUS_OWNER } from "../lib/shell-sidebar-layout.ts";
@@ -224,7 +224,7 @@ function ambientDevBinary(): DevBinaryNotice | undefined {
 	}
 }
 
-const defaultShellDeps: Omit<ShellDeps, "activeProfile"> = { fetch: (...args) => globalThis.fetch(...args), now: () => Date.now(), devBinary: ambientDevBinary, resolveWorktree: resolveSessionWorktree, gitRunner: shellGitRunner };
+const defaultShellDeps: Omit<ShellDeps, "activeProfile"> = { fetch: (input, init) => globalThis.fetch(input, init), now: () => Date.now(), devBinary: ambientDevBinary, resolveWorktree: resolveSessionWorktree, gitRunner: shellGitRunner };
 
 interface AssistantUsageEntry {
 	type: string;
@@ -1433,27 +1433,82 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 	// The 5-minute rule is per provider: one provider's fetch cannot leave the
 	// next one waiting for an interval it never used.
 	const usageFetchedAt = new Map<string, number>();
-	const refreshUsage = async (ctx: ExtensionContext, force: boolean) => {
-		const provider = ctx.model?.provider;
-		if (!provider) return;
-		const source = usageSources.get(provider);
-		if (!source && provider !== CODEX_PROVIDER && provider !== NAN_PROVIDER) return;
+	// Actual failures, per provider: a refresh that settled without a snapshot.
+	// In-flight fetches are never in here, so they cannot read as failed; a
+	// successful refresh (or a snapshot otherwise recorded) clears the provider.
+	const usageFailures = new Set<string>();
+	// Monotonic per-provider generation: each dispatched refresh takes the next
+	// number, and only the newest one for a provider may mutate its state. Two
+	// overlapping refreshes of the SAME source (or of builtins) can otherwise
+	// let an older failure settle after a newer success and poison it.
+	const usageGenerations = new Map<string, number>();
+	// One spelling of the config home, so the pin resolver, the global profiles
+	// store and the profile reader cannot drift onto two different stores.
+	const usageConfigHome = gentlePiConfigHome(env);
+	// The subagent routing in force for this session: a repository pin first,
+	// then the global active profile. Only the profile's own role entries count;
+	// the reserved orchestrator key is not a route.
+	const activeRoutingModels = (ctx: ExtensionContext): Array<string | undefined> => {
+		const pin = resolveProfilePin({ cwd: ctx.cwd, configHome: usageConfigHome, resolveWorktree: deps.resolveWorktree });
+		const config = pin ? pin.modelProfiles : undefined;
+		if (config) return [...profileRoleEntries(config).map(([, entry]) => entry.model)];
+		const store = readProfilesFileResult(profilesFilePath(usageConfigHome));
+		const active = store.status === "valid" && store.file.active !== undefined ? store.file.profiles[store.file.active] : undefined;
+		return active ? profileRoleEntries(active).map(([, entry]) => entry.model) : [];
+	};
+	// A bare model id names a provider only when exactly one provider in the
+	// registry carries that id; anything else stays untargeted rather than guessed.
+	const bareModelProvider = (ctx: ExtensionContext, modelId: string): string | undefined => {
+		try {
+			const providers = new Set(ctx.modelRegistry.getAll().filter((model) => model.id === modelId).map((model) => model.provider));
+			return providers.size === 1 ? [...providers][0] : undefined;
+		} catch {
+			return undefined;
+		}
+	};
+	const usageScopeFor = (ctx: ExtensionContext): string[] =>
+		usageScopeProviders(ctx.model?.provider, activeRoutingModels(ctx), (modelId) => bareModelProvider(ctx, modelId));
+	let usageScope: string[] = [];
+	// The scope is Git/filesystem work, so it is resolved once per refresh and
+	// per registration — never per panel render, which only reads the cache.
+	const resolveUsageScope = (ctx: ExtensionContext): string[] => {
+		usageScope = usageScopeFor(ctx);
+		return usageScope;
+	};
+	const refreshUsage = async (ctx: ExtensionContext, force: boolean, only?: string) => {
+		const scope = resolveUsageScope(ctx);
 		const now = deps.now();
-		if (!force && now - (usageFetchedAt.get(provider) ?? 0) < USAGE_REFRESH_MS) return;
-		usageFetchedAt.set(provider, now);
-		const apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider).catch(() => undefined);
-		const fetched = source
-			? await fetchFromSource(source, apiKey, deps.fetch, deps.now())
-			: provider === NAN_PROVIDER
-				? await fetchNanUsage(apiKey, deps.fetch, deps.now())
-				: await fetchCodexUsage(apiKey, deps.fetch, deps.now());
-		if (!fetched) return;
-		// A registered source can be replaced while its own fetch is still in
-		// flight; the identity captured above is this call's source, so a stale
-		// answer that outlives its replacement is discarded instead of
-		// overwriting whatever the replacement already recorded.
-		if (source && usageSources.get(provider) !== source) return;
-		usage.record(fetched);
+		let recorded = false;
+		for (const provider of scope) {
+			if (only !== undefined && provider !== only) continue;
+			const source = usageSources.get(provider);
+			if (!source && provider !== CODEX_PROVIDER && provider !== NAN_PROVIDER) continue;
+			if (!force && now - (usageFetchedAt.get(provider) ?? 0) < USAGE_REFRESH_MS) continue;
+			usageFetchedAt.set(provider, now);
+			const generation = (usageGenerations.get(provider) ?? 0) + 1;
+			usageGenerations.set(provider, generation);
+			const apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider).catch(() => undefined);
+			const fetched = source
+				? await fetchFromSource(source, apiKey, deps.fetch, deps.now())
+				: provider === NAN_PROVIDER
+					? await fetchNanUsage(apiKey, deps.fetch, deps.now())
+					: await fetchCodexUsage(apiKey, deps.fetch, deps.now());
+			// Discard before any state mutation: a generation mismatch means a
+			// newer refresh for this provider was dispatched and owns the state,
+			// and a replaced source's answer belongs to neither. A late success
+			// must not overwrite the newer snapshot, and a late failure must not
+			// mark the provider failed after its replacement succeeded.
+			if (usageGenerations.get(provider) !== generation) continue;
+			if (source && usageSources.get(provider) !== source) continue;
+			if (!fetched) {
+				usageFailures.add(provider);
+				continue;
+			}
+			usage.record(fetched);
+			usageFailures.delete(provider);
+			recorded = true;
+		}
+		if (!recorded) return;
 		renderHost?.invalidateSidebar?.();
 		renderHost?.requestRender();
 	};
@@ -1467,12 +1522,19 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 		const source = parseUsageSource(payload);
 		if (!source) return;
 		usageSources.register(source);
-		if (currentContext?.model?.provider === source.provider) void refreshUsage(currentContext, true);
+		if (!currentContext) return;
+		// A registration is interesting when its provider is targeted at all —
+		// the session's own or a subagent route of the active profile — and then
+		// only that provider is forced, never the whole scope.
+		if (resolveUsageScope(currentContext).includes(source.provider)) void refreshUsage(currentContext, true, source.provider);
 	});
 	pi.on("after_provider_response", (event) => {
 		const parsed = parseUsageHeaders(event.headers, deps.now());
 		if (!parsed) return;
 		usage.record(parsed);
+		// A snapshot that arrived with a response is evidence the provider is
+		// answering: a failure some earlier refresh recorded no longer stands.
+		usageFailures.delete(parsed.provider);
 		renderHost?.invalidateSidebar?.();
 		renderHost?.requestRender();
 	});
@@ -1493,6 +1555,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 					onRefresh: () => refreshUsage(ctx, true),
 					onClose: () => withOverlayRepaint(tui, done)(null),
 					requestRender: () => tui.requestRender(),
+					scope: () => ({ providers: usageScope, failed: new Set(usageFailures) }),
 				}),
 			{ overlay: true, overlayOptions: { width: "70%", minWidth: 60, anchor: "center" } },
 		);
