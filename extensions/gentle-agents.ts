@@ -19,6 +19,7 @@ import { VISUAL_SETTINGS_CHANGED } from "../lib/shell-sidebar.ts";
 import { resolveVisualSettings } from "../lib/visual-customization-policy.ts";
 import { createCompletionQueue } from "../lib/agents-completion-delivery.ts";
 import { createAgentMessageQueue, type PendingAgentMessage } from "../lib/agents-message-delivery.ts";
+import { createIdleWakeSender } from "../lib/idle-wake.ts";
 import { AGENT_MODE, discoverAgents, formatModelRef, loadAgentsConfig, resolveAgentProfile, withPinnedModelProfiles, type AgentDefinition, type AgentMode } from "../lib/agents-config.ts";
 import { resolveBackgroundSubagentsPolicy } from "../lib/background-subagents-policy.ts";
 import { installBackgroundCacheWarming } from "../lib/background-cache-warming.ts";
@@ -315,6 +316,9 @@ export async function answerThroughUi(ui: ExtensionContext["ui"] | undefined, as
 }
 
 export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = process.env, overrides: Partial<AgentsDeps> = {}): void {
+	// Every triggerTurn wake-up goes through this sender so an idle parent is
+	// started via prompt() and keeps its before_agent_start harness (#1528).
+	const wakeSend = createIdleWakeSender(pi);
 	const childIpc = ownedChildIpc(env, overrides.childIpc ?? (process.send ? process as unknown as IpcEndpoint : undefined));
 	if (env.GENTLE_PI_AGENTS_CHILD === "1") {
 		// A stale managed-SDD child must never inherit unrestricted ordinary tools.
@@ -479,7 +483,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 				listener = sessionTransport.createListener(registry, sessionId, async (notification) => {
 					const active = activeSessionTransport;
 					if (!active || active.generation !== generation || active.sessionManager !== sessionManager || active.sessionId !== sessionId || sessions !== sessionManager || activeSessionId() !== sessionId) throw new Error("stale session transport");
-					pi.sendMessage({ customType: AGENTS_ORCHESTRATOR_MESSAGE_TYPE, content: `Session message from ${notification.senderSessionId} (correlation ${notification.id}): ${notification.message}`, display: true, details: { gentleAgents: { senderSessionId: notification.senderSessionId, recipientSessionId: sessionId, correlationId: notification.id, direction: "incoming" } } }, { deliverAs: "followUp", triggerTurn: true });
+					wakeSend({ customType: AGENTS_ORCHESTRATOR_MESSAGE_TYPE, content: `Session message from ${notification.senderSessionId} (correlation ${notification.id}): ${notification.message}`, display: true, details: { gentleAgents: { senderSessionId: notification.senderSessionId, recipientSessionId: sessionId, correlationId: notification.id, direction: "incoming" } } }, { deliverAs: "followUp", triggerTurn: true });
 				});
 				client = sessionTransport.createClient(registry, sessionId);
 				if (sessions !== sessionManager || generation !== transportGeneration || activeSessionId() !== sessionId) {
@@ -588,7 +592,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		// branch, so a parent that keeps calling tools would see the completion
 		// only when the whole run ends — the original #867 delay. When the parent
 		// is idle, triggerTurn runs the prompt immediately, preserving wake-up.
-		pi.sendMessage({ customType: AGENTS_RESULT_TYPE, content: completionText(task), display: true, details: taskDetails(task) }, { deliverAs: "steer", triggerTurn: true });
+		wakeSend({ customType: AGENTS_RESULT_TYPE, content: completionText(task), display: true, details: taskDetails(task) }, { deliverAs: "steer", triggerTurn: true });
 	};
 
 	// A stale completion must not re-enter the LLM conversation, so it is
@@ -601,7 +605,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 
 	const deliverMessage = (msg: PendingAgentMessage) => {
 		if (activeSessionId() !== msg.parentSessionId) return;
-		pi.sendMessage(
+		wakeSend(
 			{ customType: AGENTS_MESSAGE_TYPE, content: msg.content, display: msg.display, details: msg.details },
 			{ deliverAs: "steer", triggerTurn: true },
 		);

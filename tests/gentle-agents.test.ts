@@ -110,6 +110,7 @@ function fakePi() {
 	const shortcuts = new Map<string, { description: string; handler(ctx: ExtensionContext): Promise<void> }>();
 	const commands = new Map<string, { handler(args: string, ctx: ExtensionContext): Promise<void> }>();
 	const sent: Array<{ message: Record<string, unknown>; options: Record<string, unknown> }> = [];
+	const userMessages: unknown[] = [];
 	const renderers = new Map<string, (message: unknown, options: { expanded: boolean }, theme: unknown) => { render(width: number): string[] }>();
 	const entryRenderers = new Map<string, (entry: { type: string; customType: string; data: unknown }, options: { expanded: boolean }, theme: unknown) => { render(width: number): string[] }>();
 	const entries: Array<{ type: string; customType: string; data: unknown }> = [];
@@ -125,6 +126,7 @@ function fakePi() {
 			},
 		},
 		sendMessage: (message: Record<string, unknown>, options: Record<string, unknown>) => sent.push({ message, options }),
+		sendUserMessage: (content: unknown) => userMessages.push(content),
 		registerMessageRenderer: (type: string, renderer: (message: unknown, options: { expanded: boolean }, theme: unknown) => { render(width: number): string[] }) => renderers.set(type, renderer),
 		registerEntryRenderer: (type: string, renderer: (entry: { type: string; customType: string; data: unknown }, options: { expanded: boolean }, theme: unknown) => { render(width: number): string[] }) => entryRenderers.set(type, renderer),
 		on: (event: string, handler: Handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
@@ -153,7 +155,7 @@ function fakePi() {
 			}
 		}
 	};
-	return { pi, tools, shortcuts, commands, fire, sent, renderers, entryRenderers, entries, events, listeners };
+	return { pi, tools, shortcuts, commands, fire, sent, userMessages, renderers, entryRenderers, entries, events, listeners };
 }
 
 function fakeContext(tui: { requestRender(): void } = fakeTui, confirmResult: (title: string, message: string) => Promise<boolean> = async () => true, inputResult: (title: string, placeholder: string | undefined) => Promise<string | undefined> = async () => undefined, overlayTui: { terminal: { rows: number }; requestRender(): void } = { terminal: { rows: 30 }, requestRender() {} }, selectResult: (title: string, options: string[]) => Promise<string | undefined> = async (_title, options) => options[0]) {
@@ -4330,4 +4332,25 @@ test("children receive the child-context extension, and a missing file is omitte
 			await tick();
 		}
 	}
+});
+
+test("a completion for an idle parent starts the turn through prompt(), not a bare triggerTurn (#1528)", async () => {
+	// pi#5581: an idle sendMessage(..., { triggerTurn: true }) skips
+	// before_agent_start, so the woken turn would run without the harness. The
+	// completion is queued as nextTurn and the turn is started with a prompt.
+	const { pi, tools, fire, sent, userMessages } = fakePi();
+	const harness = deps();
+	gentleAgents(pi, {}, harness.deps);
+	const { ctx } = fakeContext();
+	const idleCtx = { ...ctx, isIdle: () => true } as unknown as ExtensionContext;
+	await fire("session_start", idleCtx);
+	await tools.get("subagent_run")!.execute("c1", { agent: "explore", task: "Idle job", mode: "background" }, undefined, undefined, idleCtx);
+	await tick();
+	harness.children[0].emit({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "Done while idle." }] }] });
+	harness.children[0].emit({ type: "agent_settled" });
+	await tick();
+	assert.equal(sent.length, 1, "the completion is delivered once");
+	assert.equal(sent[0].message.customType, "gentle-agents.result");
+	assert.deepEqual(sent[0].options, { deliverAs: "nextTurn" });
+	assert.deepEqual(userMessages, [" "], "the idle parent is started through the prompt path");
 });
