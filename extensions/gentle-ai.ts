@@ -2413,13 +2413,14 @@ function modelProfileForRoutingEntry(
 // The profile store knows nothing about role fallbacks, so rewriting a role
 // from it must not erase the list a user keeps in subagents.json. The list
 // belongs to the primary it was written for: it survives only while the
-// materialized model is unchanged.
+// materialized model is unchanged. That includes a cleared entry over a
+// fallback-only profile, where neither side names a primary.
 function withPreservedFallbacks(
 	profile: Record<string, string> | undefined,
 	existing: unknown,
 ): Record<string, unknown> | undefined {
-	if (!profile || !isRecord(existing) || !Array.isArray(existing.fallbacks)) return profile;
-	if (existing.model !== profile.model) return profile;
+	if (!isRecord(existing) || !Array.isArray(existing.fallbacks)) return profile;
+	if (existing.model !== profile?.model) return profile;
 	return { ...profile, fallbacks: existing.fallbacks };
 }
 

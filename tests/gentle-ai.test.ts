@@ -3016,3 +3016,23 @@ test("applying a profile keeps role fallbacks only for a role whose primary mode
 		helper: { model: "openai/gamma" },
 	}, "fallbacks follow the primary they were written for");
 });
+
+test("clearing a role keeps a fallback-only profile and drops fallbacks whose primary is cleared", async (t) => {
+	const { fixture, writeStore, writeSettings } = profilesStoreFixture(t);
+	writeSettings();
+	const helperPath = join(fixture.root, ".pi", "agents", "helper.md");
+	writeMarkdown(helperPath, "---\nname: helper\ndescription: Helper\nmodel: openai/beta\n---\nbody\n");
+	const subagentsPath = join(fixture.root, ".pi", "subagents.json");
+	writeFileSync(subagentsPath, `${JSON.stringify({ model_profiles: {
+		worker: { fallbacks: ["other/alpha"] },
+		helper: { model: "openai/beta", fallbacks: ["other/beta"] },
+	} }, null, 2)}\n`);
+	writeStore({ team: { worker: {}, helper: {} } });
+	applyOnce(fixture);
+	await fixture.run("gentle:profiles");
+
+	const profiles = JSON.parse(readFileSync(subagentsPath, "utf8"));
+	assert.deepEqual(profiles.model_profiles, {
+		worker: { fallbacks: ["other/alpha"] },
+	}, "a cleared entry keeps fallbacks only where no primary changed");
+});
