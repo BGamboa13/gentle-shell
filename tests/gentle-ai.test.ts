@@ -2995,3 +2995,24 @@ test("switchLiveOrchestrator returns note when setModel fails", async () => {
 	const result = await __testing.switchLiveOrchestrator(ctx, live, entry);
 	assert.equal(result, "\nno authentication is configured for openai; this session keeps its current model.");
 });
+
+test("applying a profile keeps role fallbacks only for a role whose primary model is unchanged", async (t) => {
+	const { fixture, writeStore, writeSettings } = profilesStoreFixture(t);
+	writeSettings();
+	const helperPath = join(fixture.root, ".pi", "agents", "helper.md");
+	writeMarkdown(helperPath, "---\nname: helper\ndescription: Helper\nmodel: openai/beta\n---\nbody\n");
+	const subagentsPath = join(fixture.root, ".pi", "subagents.json");
+	writeFileSync(subagentsPath, `${JSON.stringify({ model_profiles: {
+		worker: { model: "openai/alpha", effort: "low", fallbacks: ["other/alpha"] },
+		helper: { model: "openai/beta", fallbacks: ["other/beta"] },
+	} }, null, 2)}\n`);
+	writeStore({ team: { worker: { model: "openai/alpha", thinking: "high" }, helper: { model: "openai/gamma" } } });
+	applyOnce(fixture);
+	await fixture.run("gentle:profiles");
+
+	const profiles = JSON.parse(readFileSync(subagentsPath, "utf8"));
+	assert.deepEqual(profiles.model_profiles, {
+		worker: { model: "openai/alpha", effort: "high", fallbacks: ["other/alpha"] },
+		helper: { model: "openai/gamma" },
+	}, "fallbacks follow the primary they were written for");
+});

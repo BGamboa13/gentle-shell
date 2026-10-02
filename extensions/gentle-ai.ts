@@ -2410,6 +2410,19 @@ function modelProfileForRoutingEntry(
 	return Object.keys(profile).length > 0 ? profile : undefined;
 }
 
+// The profile store knows nothing about role fallbacks, so rewriting a role
+// from it must not erase the list a user keeps in subagents.json. The list
+// belongs to the primary it was written for: it survives only while the
+// materialized model is unchanged.
+function withPreservedFallbacks(
+	profile: Record<string, string> | undefined,
+	existing: unknown,
+): Record<string, unknown> | undefined {
+	if (!profile || !isRecord(existing) || !Array.isArray(existing.fallbacks)) return profile;
+	if (existing.model !== profile.model) return profile;
+	return { ...profile, fallbacks: existing.fallbacks };
+}
+
 function updateSubagentModelProfileAtPath(
 	path: string,
 	name: string,
@@ -2428,7 +2441,7 @@ function updateSubagentModelProfileAtPath(
 	const modelProfiles = isRecord(config.model_profiles)
 		? { ...config.model_profiles }
 		: {};
-	const profile = modelProfileForRoutingEntry(entry);
+	const profile = withPreservedFallbacks(modelProfileForRoutingEntry(entry), modelProfiles[name]);
 	// A write that would leave the profile as it is (including removing a
 	// profile that was never there) is not an update and touches no file.
 	if (JSON.stringify(modelProfiles[name]) === JSON.stringify(profile)) return false;
@@ -2461,7 +2474,7 @@ async function updateSubagentModelProfileAtPathAsync(
 	const modelProfiles = isRecord(config.model_profiles)
 		? { ...config.model_profiles }
 		: {};
-	const profile = modelProfileForRoutingEntry(entry);
+	const profile = withPreservedFallbacks(modelProfileForRoutingEntry(entry), modelProfiles[name]);
 	// A write that would leave the profile as it is (including removing a
 	// profile that was never there) is not an update and touches no file.
 	if (JSON.stringify(modelProfiles[name]) === JSON.stringify(profile)) return false;
