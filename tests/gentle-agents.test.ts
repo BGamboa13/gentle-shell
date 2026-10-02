@@ -14,7 +14,7 @@ import type { TestContext } from "node:test";
 import { generateUnifiedPatch, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { sidebarState } from "../lib/shell-sidebar.ts";
-import gentleAgents, { agentRuntimePaths, agentsCollapseKey, agentsEnabled, agentsStopKey, agentsViewKey, agentResultPreview, answerThroughUi, childContextExtensionPaths, completionText, createDefaultSessionTransport, legacySubagentsInstalled, PARENT_WAKE_GRACE_MS, type AgentsDeps, type SessionTransportFactory } from "../extensions/gentle-agents.ts";
+import gentleAgents, { agentRuntimePaths, agentsCollapseKey, agentsEnabled, agentsStopKey, agentsViewKey, agentResultPreview, answerThroughUi, childContextExtensionPaths, completionText, createDefaultSessionTransport, legacySubagentsInstalled, HOLD_RECHECK_MS, INPUT_PROMPT_GRACE_MS, PARENT_WAKE_GRACE_MS, type AgentsDeps, type SessionTransportFactory } from "../extensions/gentle-agents.ts";
 import { ActiveSessionClient, ActiveSessionListener, SessionPresenceRegistry } from "../lib/agents-session-transport.ts";
 import { WindowsActiveSessionClient, WindowsActiveSessionListener } from "../lib/windows-session-transport.ts";
 import { historyDir, loadHistory, saveTask } from "../lib/agents-history.ts";
@@ -4782,4 +4782,176 @@ test("children receive context and safety extensions, and missing files are omit
 			await tick();
 		}
 	}
+});
+
+// Held content is released by lifecycle events (the fast path), and by a
+// held-only re-check that does not depend on any event: a cancelled `/tree`
+// summarization emits none.
+test("session_tree releases content held while the parent summarized a branch", async () => {
+	const { fire, ctx, sent, userMessages, notify, setIdle, timers } = await orchestratorHost();
+	setIdle(false);
+	await notify("hello tree");
+	assert.equal(sent.length, 0, "nothing is sent while the parent is busy without a run");
+	await fire("session_tree", ctx);
+	setIdle(true);
+	assert.equal(timers.run(0), 1, "one deferred flush is scheduled for the tree boundary");
+	await tick();
+	assert.deepEqual(sent.map((entry) => entry.options), [{ triggerTurn: false }]);
+	assert.equal(userMessages.length, 1, "one wake follows the held content");
+	await fire("session_shutdown", ctx);
+});
+
+test("a held-only re-check releases content when the busy state ends without any event", async () => {
+	const { fire, ctx, sent, userMessages, notify, setIdle, timers } = await orchestratorHost();
+	setIdle(false);
+	await notify("hello cancelled summary");
+	assert.equal(timers.pending(HOLD_RECHECK_MS), 1, "holding content arms exactly one re-check");
+	assert.equal(timers.run(HOLD_RECHECK_MS), 1);
+	assert.equal(sent.length, 0, "still busy: nothing is delivered");
+	assert.equal(timers.pending(HOLD_RECHECK_MS), 1, "a still-busy parent keeps one re-check armed");
+	setIdle(true);
+	assert.equal(timers.run(HOLD_RECHECK_MS), 1);
+	await tick();
+	assert.deepEqual(sent.map((entry) => entry.options), [{ triggerTurn: false }]);
+	assert.equal(userMessages.length, 1);
+	assert.equal(timers.pending(HOLD_RECHECK_MS), 0, "the re-check stops once the content was delivered");
+	await fire("session_shutdown", ctx);
+});
+
+test("the held-only re-check also releases child completions and child messages", async () => {
+	const { pi, tools, fire, sent, userMessages, setIdle } = fakePi();
+	const harness = deps();
+	const timers = recordTimers(harness.deps);
+	gentleAgents(pi, {}, harness.deps);
+	const { ctx } = fakeContext();
+	await fire("session_start", ctx);
+	await tools.get("subagent_run")!.execute("c1", { agent: "explore", task: "Asks while busy", mode: "background" }, undefined, undefined, ctx);
+	await tools.get("subagent_run")!.execute("c2", { agent: "explore", task: "Ends while busy", mode: "background" }, undefined, undefined, ctx);
+	await tick();
+	// The runner's own clock tick shares HOLD_RECHECK_MS, so count against it.
+	const clockTicks = timers.pending(HOLD_RECHECK_MS);
+	setIdle(false);
+	harness.children[0].message({ id: "q1", kind: "query", message: "Which branch?" });
+	harness.children[1].emit({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }] });
+	harness.children[1].emit({ type: "agent_settled" });
+	await tick();
+	assert.equal(sent.length, 0);
+	const armed = timers.pending(HOLD_RECHECK_MS) - clockTicks;
+	assert.equal(armed, 1, "held child content arms exactly one re-check");
+	setIdle(true);
+	timers.run(HOLD_RECHECK_MS);
+	await tick();
+	assert.equal(sent.length, 2, "the query and the completion are both delivered");
+	assert.equal(userMessages.length, 1);
+	assert.equal(timers.pending(HOLD_RECHECK_MS) <= clockTicks, true, "the re-check stops once the content was delivered");
+	await fire("session_shutdown", ctx);
+});
+
+test("no held-only re-check is armed when nothing is held", async () => {
+	const { fire, ctx, notify, setIdle, timers } = await orchestratorHost();
+	setIdle(false);
+	await fire("turn_end", ctx);
+	await fire("session_tree", ctx);
+	timers.run(0);
+	assert.equal(timers.pending(HOLD_RECHECK_MS), 0, "a busy parent with nothing held is never polled");
+	setIdle(true);
+	await notify("hello idle");
+	await tick();
+	assert.equal(timers.pending(HOLD_RECHECK_MS), 0, "an idle parent is never polled");
+	await fire("agent_start", ctx);
+	await notify("hello run");
+	await tick();
+	assert.equal(timers.pending(HOLD_RECHECK_MS), 0, "a running parent is never polled");
+	await fire("session_shutdown", ctx);
+});
+
+test("a boundary flush that delivers held content cancels the re-check", async () => {
+	const { fire, ctx, sent, notify, setIdle, timers } = await orchestratorHost();
+	setIdle(false);
+	await notify("hello boundary");
+	assert.equal(timers.pending(HOLD_RECHECK_MS), 1);
+	await fire("agent_start", ctx);
+	await fire("turn_end", ctx);
+	assert.equal(sent.length, 1, "the boundary flush delivered the held message");
+	assert.equal(timers.pending(HOLD_RECHECK_MS), 0, "nothing is left to re-check");
+	await fire("session_shutdown", ctx);
+});
+
+test("a session change cancels the held-only re-check and drops the held content", async () => {
+	const { fire, ctx, sent, notify, setIdle, timers } = await orchestratorHost();
+	setIdle(false);
+	await notify("hello replaced");
+	assert.equal(timers.pending(HOLD_RECHECK_MS), 1);
+	await fire("session_start", fakeContext().ctx);
+	assert.equal(timers.pending(HOLD_RECHECK_MS), 0, "the old session's re-check is cancelled");
+	setIdle(true);
+	timers.run(HOLD_RECHECK_MS);
+	await tick();
+	assert.equal(sent.length, 0, "the old session's message is not replayed into the new one");
+	await fire("session_shutdown", ctx);
+});
+
+// A user prompt is "starting" from `input` until `before_agent_start`, while
+// the host still reports idle. A wake dispatched in that window races the
+// user's prompt into Agent.prompt().
+test("content stored while a user prompt is starting sends no wake and rides that prompt's run", async () => {
+	const { fire, ctx, sent, userMessages, notify, timers } = await orchestratorHost();
+	await fire("input", ctx, { type: "input", text: "hi", source: "interactive" });
+	assert.equal(timers.pending(INPUT_PROMPT_GRACE_MS), 1, "the starting prompt is bounded by its own grace");
+	await notify("hello starting");
+	await tick();
+	assert.deepEqual(sent.map((entry) => entry.options), [{ triggerTurn: false }], "the message is stored");
+	assert.equal(userMessages.length, 0, "no wake races the starting prompt");
+	await fire("before_agent_start", ctx, { prompt: "hi" });
+	await fire("agent_start", ctx);
+	assert.equal(timers.pending(INPUT_PROMPT_GRACE_MS), 0);
+	assert.equal(timers.pending(PARENT_WAKE_GRACE_MS), 0);
+	await fire("agent_settled", ctx);
+	await tick();
+	assert.equal(userMessages.length, 0, "the run that started carried the content, so no wake is owed");
+	await fire("session_shutdown", ctx);
+});
+
+test("an input that never starts a run lets the owed wake go out after INPUT_PROMPT_GRACE_MS", async () => {
+	const { fire, ctx, userMessages, notify, timers } = await orchestratorHost();
+	await fire("input", ctx, { type: "input", text: "handled elsewhere", source: "interactive" });
+	await notify("hello expired");
+	await tick();
+	assert.equal(userMessages.length, 0);
+	assert.equal(timers.run(INPUT_PROMPT_GRACE_MS), 1);
+	await tick();
+	assert.equal(userMessages.length, 1, "the owed wake is sent once the starting state expires");
+	await fire("session_shutdown", ctx);
+});
+
+// A dispatched wake is itself a prompt: it reaches `input` too. That must not
+// shorten the wake's own PARENT_WAKE_GRACE_MS window to INPUT_PROMPT_GRACE_MS,
+// or content arriving while the wake is still in its pre-run phase would send
+// a second wake that races the first into Agent.prompt().
+test("the dispatched wake's own input does not shorten its start window", async () => {
+	const { fire, ctx, userMessages, notify, timers } = await orchestratorHost();
+	await notify("first");
+	await tick();
+	assert.equal(userMessages.length, 1, "the idle wake is dispatched");
+	await fire("input", ctx, { type: "input", text: String(userMessages[0]!.content), source: "extension" });
+	await notify("second");
+	await tick();
+	timers.run(INPUT_PROMPT_GRACE_MS);
+	await tick();
+	assert.equal(userMessages.length, 1, "no second wake while the first is still starting");
+	assert.equal(timers.pending(PARENT_WAKE_GRACE_MS), 1, "the wake keeps its own start window");
+	await fire("session_shutdown", ctx);
+});
+
+test("an input during a run or with a streaming behavior changes nothing", async () => {
+	const { fire, ctx, userMessages, notify, timers } = await orchestratorHost();
+	await fire("input", ctx, { type: "input", text: "queued", source: "interactive", streamingBehavior: "steer" });
+	assert.equal(timers.pending(INPUT_PROMPT_GRACE_MS), 0, "a queued input is not a starting prompt");
+	await notify("hello idle");
+	await tick();
+	assert.equal(userMessages.length, 1, "the idle wake is unaffected");
+	await fire("agent_start", ctx);
+	await fire("input", ctx, { type: "input", text: "mid-run", source: "interactive" });
+	assert.equal(timers.pending(INPUT_PROMPT_GRACE_MS), 0, "an input during a run is not a starting prompt");
+	await fire("session_shutdown", ctx);
 });
