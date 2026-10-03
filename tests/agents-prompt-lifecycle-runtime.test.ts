@@ -25,7 +25,9 @@ import { fakeChild, type FakeChild } from "./agents-fake-child.ts";
 // integrations (the Claude bridge) depend on: every provider request carries
 // what `before_agent_start` appended to the system prompt. A turn started
 // through sendMessage(triggerTurn) on an idle host skips that event and so
-// lacks it.
+// lacks it. Native providers may continue through a hidden custom-message turn
+// by design, so the faux provider is registered as `claude-bridge`, the
+// selection that requires the prompt lifecycle.
 
 const MARKER = "PROMPT-LIFECYCLE-MARKER-7f3a";
 const ORCHESTRATOR_TEXT = "orchestrator-says-ping-91c2";
@@ -80,7 +82,7 @@ async function createHost(t: TestContext): Promise<Host> {
 	writeFileSync(join(agentDir, "agents", "explore.md"), "---\ndescription: maps things\ntools: [read, grep]\n---\nYou map things.");
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 
-	const faux = fauxProvider();
+	const faux = fauxProvider({ provider: "claude-bridge" });
 	const requests: RecordedRequest[] = [];
 	const holds: Array<{ kind: "turn" | "summary"; reached: () => void; released: Promise<void> }> = [];
 	const respond: FauxResponseFactory = async (context) => {

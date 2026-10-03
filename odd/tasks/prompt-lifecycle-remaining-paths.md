@@ -3,6 +3,8 @@
 ## Objective
 Every model-visible message Gentle Agents hands to a parent session starts its turn through Pi's prompt lifecycle (`before_agent_start`), never through a direct `triggerTurn` run, in every host state. Held content always reaches the parent without waiting for an unrelated user prompt. Proven on the real Pi host, not only on the fake.
 
+Scope after merging main 2fb7700a: cf3012f7 lets native providers continue through a hidden `triggerTurn` wake by design, so the prompt-lifecycle guarantee applies to the Claude Bridge selection; holds apply to every provider.
+
 ## Base
 `origin/main` 2549f17a (includes #1631). Pi source read at earendil-works/pi 6f1072c; installed host 0.99.2.
 
@@ -41,3 +43,8 @@ Side finding fixed in the same change: `restoreSessionHistory` read `ctx.session
 Each commit passes on its own (295c7a54: gentle-agents 172/172). Real-host file stable over 5 consecutive runs.
 Clean-HOME `pnpm test`: 4574 tests, 4539 pass, 34 skipped, 1 fail (the known `npm pack --json` npm 12 failure); +10 tests vs baseline 4564. `pnpm run typecheck`: no regressions.
 Residual: a held orchestrator message is lost if the session is replaced before the boundary (sender already acknowledged), like pending child content. Receiver-side admission (#1518) is not implemented; the route decision is where it would plug in. T2 (release hold on `session_tree` / cancelled summarization) still applies to held orchestrator messages.
+
+### Merge with main 2fb7700a
+- cf3012f7 split the idle wake: Claude Bridge keeps a user wake through the prompt lifecycle; native providers get a hidden `gentle-agents.wake` custom-message turn. The real-host harness now registers the faux provider as `claude-bridge`.
+- The bridge wake text is persisted per session (`gentle-agents.wake-identity`) and validated against `PARENT_WAKE_TEXT` on restore, so the wake text is no longer changed here and the idle test no longer asserts it.
+- cf3012f7 also moved the `restoreSessionHistory` session check inside its try; main's version replaces this branch's guard.
