@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { readDelegationDetail } from "./support/orchestrator-modules.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const ASSETS = join(ROOT, "assets");
@@ -13,7 +14,7 @@ function read(relativePath: string): string {
 }
 
 const core = read("assets/orchestrator.md");
-const delegation = read("assets/orchestrator-delegation.md");
+const delegation = readDelegationDetail();
 const staticPrompts = `${core}\n${delegation}`;
 
 test("static prompts omit stale native RDD lifecycle mirrors", () => {
@@ -73,7 +74,7 @@ test("rendered parent prompt keeps the RDD boundary while omitting lifecycle mir
 });
 
 test("static prompts retain ODD and delegated-work guidance without SDD", () => {
-	for (const heading of ["## Memory Contract", "## Work Routing Ladder"]) {
+	for (const heading of ["## Memory Contract", "## Task Size", "## Mechanisms"]) {
 		assert.ok(core.includes(heading), `core lost ${heading}`);
 	}
 	for (const heading of [
