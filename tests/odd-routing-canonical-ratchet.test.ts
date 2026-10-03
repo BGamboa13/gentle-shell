@@ -84,22 +84,24 @@ const ANCHORS: readonly RoutingAnchor[] = [
 		],
 	},
 	{
-		label: "mapping trigger at 4 or more files",
-		canonical: "**Mapping trigger:** when understanding the work requires 4 or more files",
-		// Gentle Shell intentionally leads the canon here: the local mirrors carry
-		// the measured evidence-budget rule instead of the 4-file count (tracked by
-		// gentle-ai#5139). The canonical anchor stays until gentle-ai follows.
+		label: "mapping trigger at the evidence budget",
+		canonical: "**Mapping trigger:** when evidence exceeds the inline batch budget",
+		// gentle-ai#5139 replaced the canonical 4-file count with the measured
+		// evidence-budget rule the local mirrors already carried.
 		mirrors: [
 			{ surface: DELEGATION, includes: "**Mapping trigger (Evidence-budget rule):** read inline only when the evidence fits one parallel batch of at most 3 calls" },
-			{ surface: CORE, includes: "**Evidence-budget rule** — read inline only if evidence fits one parallel batch (at most 3 calls, ~10k tokens" },
+			{ surface: CORE, includes: "**Evidence-budget rule** — understanding needs more than one read batch" },
 		],
 	},
 	{
 		label: "writer trigger at 2 or more non-trivial files",
 		canonical: "**Writer trigger:** when implementation touches 2 or more non-trivial files",
+		// Gentle Shell intentionally leads the canon here: task size, not file
+		// count, fires the writer (gentle-shell#1494). The canonical anchor stays
+		// until gentle-ai follows.
 		mirrors: [
-			{ surface: DELEGATION, includes: "**Writer trigger (Multi-file write rule):** when implementation touches 2 or more non-trivial files" },
-			{ surface: CORE, includes: "**Multi-file write rule** — 2+ non-trivial files touched" },
+			{ surface: DELEGATION, includes: "**Writer trigger (Writer rule):** a large task delegates one bounded writer per task" },
+			{ surface: CORE, includes: "**Writer rule** — large task → one bounded `gentle-ai-worker` per task" },
 		],
 	},
 	{
@@ -126,9 +128,23 @@ const ANCHORS: readonly RoutingAnchor[] = [
 	},
 	{
 		label: "triggers select only the ODD topology",
-		canonical: "These triggers never select SDD and never create SDD artifacts",
+		canonical: "These triggers only choose between direct inline and delegated direct inside the organic flow",
 		mirrors: [
 			{ surface: DELEGATION, includes: "These triggers only choose between direct inline and delegated direct inside ODD" },
+		],
+	},
+	{
+		label: "handoffs pass the feature spec by reference (gentle-shell#1713)",
+		canonical: "Hand off by reference, never by paraphrase: name the document, task, and specs",
+		mirrors: [
+			{ surface: EXTENSION, includes: "Hand off by reference, never by paraphrase: name the document, task, and specs" },
+		],
+	},
+	{
+		label: "verify runs only authorized examples on isolated state",
+		canonical: "runs the spec's examples the parent authorized, against isolated state when they mutate data",
+		mirrors: [
+			{ surface: EXTENSION, includes: "runs the spec's examples the parent authorized, against isolated state when they mutate data" },
 		],
 	},
 	{
@@ -143,7 +159,7 @@ const ANCHORS: readonly RoutingAnchor[] = [
 // rows, so they are mirror-only and not fixture-derived anchors.
 const CORE_ONLY_TRIGGERS = [
 	"**Incident rule** — diagnose wrong cwd/worktree/git/tooling incidents separately",
-	"**Verification rule** — executing/delegating verification commands",
+	"**Verification rule** — high risk → independent `gentle-ai-verify`",
 ] as const;
 
 function fixtureBody(): string {
@@ -207,6 +223,16 @@ test("the pi mirror surfaces carry every mapped mandatory-delegation anchor", ()
 			);
 		}
 	}
+});
+
+// gentle-shell#1494 tripwire: the writer and mapping anchors keep the old
+// canonical text only while Gentle Shell leads the canon. Once the regenerated
+// fixture carries the Task Size section (gentle-ai#5217), restore real parity.
+test("the writer anchor's divergence expires when the canon gains Task Size", () => {
+	assert.ok(
+		!fixtureBody().includes("### Task Size"),
+		"the canon now carries Task Size (gentle-ai#5217): replace the file-count writer and mapping anchors with the canonical Task Size wording",
+	);
 });
 
 test("the always-on core prompt carries the condensed incident and verification trigger rows", () => {

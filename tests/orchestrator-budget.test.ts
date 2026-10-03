@@ -197,13 +197,13 @@ const DISPOSITION_MAP: DispositionRange[] = [
 	{ lines: [9, 13], target: "core", label: "Core Role" },
 	{ lines: [15, 15], target: "core", label: "Language Boundary heading" },
 	{ lines: [17, 17], target: "core", label: "Language Boundary LB1 pointer" },
-	{ lines: [19, 19], target: "delegation", label: "Language Boundary LB2 (subagent-English)" },
+	{ lines: [19, 19], target: "replaced", label: "Language Boundary LB2: request translation replaced by spec-by-reference handoffs (gentle-shell#1713)" },
 	{ lines: [21, 21], target: "replaced", label: "Language Boundary LB3: retired artifact types" },
 	{ lines: [23, 23], target: "core", label: "Language Boundary LB4 (public comment language)" },
 	{ lines: [25, 28], target: "delegation", label: "Language Boundary LB5 (exceptions)" },
 	{ lines: [29, 29], target: "obsolete", label: "Retired artifact exception" },
 	{ lines: [31, 40], target: "replaced", label: "Mental Model: ODD-only" },
-	{ lines: [42, 42], target: "core", label: "Work Routing Ladder heading" },
+	{ lines: [42, 42], target: "replaced", label: "Work Routing Ladder heading replaced by Task Size and Mechanisms (gentle-shell#1494)" },
 	{
 		lines: [44, 97],
 		target: "replaced",
@@ -351,7 +351,7 @@ for (const range of DISPOSITION_MAP) {
 test("core-alone: load-bearing direct-delegation tokens remain without lazy union", () => {
 	const core = readRealAsset("orchestrator.md");
 	assert.match(core, /Evidence-budget rule/);
-	assert.match(core, /Multi-file write rule/);
+	assert.match(core, /Writer rule/);
 	assert.match(core, /Incident rule/);
 	assert.match(core, /Verification rule/);
 	assert.match(core, /Context backstop/);
@@ -448,8 +448,13 @@ test("every compressed lazy-file pointer in the core still names the material it
 	const namedPointers: ReadonlyArray<{ file: string; mustName: readonly string[] }> = [
 		{
 			file: "orchestrator-delegation.md",
-			mustName: ["Per-action table", "Work Routing Ladder", "Canonical Workflows", "blocking-prompt relays"],
+			mustName: ["Per-action table", "Work Routing Ladder", "Canonical Workflows"],
 		},
+		// gentle-shell#1494 per-mechanism modules.
+		{ file: "orchestrator-prompts.md", mustName: ["blocking-prompt relays", "provider defects"] },
+		{ file: "orchestrator-tracking.md", mustName: ["Track", "feature document"] },
+		{ file: "orchestrator-verification.md", mustName: ["Verification rule", "high risk"] },
+		{ file: "orchestrator-writer.md", mustName: ["Writer rule", "large task"] },
 		{
 			file: "orchestrator-memory.md",
 			mustName: ["ODD task continuity", "memory lifecycle"],
