@@ -3,6 +3,8 @@
 ## Objective
 Every model-visible message Gentle Agents hands to a parent session starts its turn through Pi's prompt lifecycle (`before_agent_start`), never through a direct `triggerTurn` run, in every host state. Held content reaches the parent without waiting for an unrelated user prompt, unless the session changes first (see the T1 residual below). Proven on the real Pi host, not only on the fake.
 
+Scope after merging main 2fb7700a: cf3012f7 lets native providers continue through a hidden `triggerTurn` wake by design, so the prompt-lifecycle guarantee applies to the Claude Bridge selection; holds apply to every provider.
+
 ## Base
 `origin/main` 2549f17a (includes #1631). Pi source read at earendil-works/pi 6f1072c; installed host 0.99.2.
 
@@ -55,3 +57,8 @@ Clean-HOME `pnpm test` with T3: 4587 tests, 4551 pass, 34 skipped, 2 fail: the k
 
 ### T4 (base 2549f17a)
 The textual rebase of #1574 applied cleanly but kept `sendMessage(notice, { steer, triggerTurn: true })`, which re-introduces #1528 for stale notices on an idle parent. Red on the plain rebase: idle parent (notice sent with triggerTurn:true instead of stored), hold then boundary (same), stale + fresh in one idle flush (same); run-route guard green. Green: gentle-agents 178/178. Clean env: only the npm 12 failure and two `review-host-relay-routing` failures that reproduce identically on a clean main checkout.
+
+### Merge with main 2fb7700a
+- cf3012f7 split the idle wake: Claude Bridge keeps a user wake through the prompt lifecycle; native providers get a hidden `gentle-agents.wake` custom-message turn. The real-host harness now registers the faux provider as `claude-bridge`.
+- The bridge wake text is persisted per session (`gentle-agents.wake-identity`) and validated against `PARENT_WAKE_TEXT` on restore, so the wake text is no longer changed here and the idle test no longer asserts it.
+- cf3012f7 also moved the `restoreSessionHistory` session check inside its try; main's version replaces this branch's guard.
