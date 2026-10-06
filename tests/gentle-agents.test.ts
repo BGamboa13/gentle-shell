@@ -5791,6 +5791,40 @@ test("the held-only re-check also releases child completions and child messages"
 	await fire("session_shutdown", ctx);
 });
 
+test("a completion re-queued after a failed forward still arms the held-only re-check", async () => {
+	const { pi, tools, fire, sent, setIdle } = fakePi();
+	const harness = deps();
+	const timers = recordTimers(harness.deps);
+	gentleAgents(pi, {}, harness.deps);
+	const { ctx } = fakeContext();
+	await fire("session_start", ctx);
+	await tools.get("subagent_run")!.execute("c1", { agent: "explore", task: "Fails to forward", mode: "background" }, undefined, undefined, ctx);
+	await tick();
+	const sendMessage = pi.sendMessage;
+	Object.assign(pi, { sendMessage: () => { throw new Error("host busy"); } });
+	harness.children[0].emit({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "Requeued answer." }] }] });
+	harness.children[0].emit({ type: "agent_settled" });
+	await tick();
+	assert.equal(sent.length, 0, "the idle forward failed and the completion was re-queued");
+	Object.assign(pi, { sendMessage });
+	// The runner's own clock tick shares HOLD_RECHECK_MS, so count against it.
+	const clockTicks = timers.pending(HOLD_RECHECK_MS);
+	// The bounded retry fires while the parent compacts without a run, so the
+	// re-queued completion is held and only the re-check can release it.
+	setIdle(false);
+	assert.equal(timers.run(PARENT_WAKE_GRACE_MS), 1, "the idle failure armed one bounded retry");
+	await tick();
+	assert.equal(sent.length, 0, "still busy: nothing is delivered");
+	assert.equal(timers.pending(HOLD_RECHECK_MS) - clockTicks, 1, "the re-queued completion arms exactly one re-check");
+	setIdle(true);
+	timers.run(HOLD_RECHECK_MS);
+	await tick();
+	const results = sent.filter((entry) => entry.message.customType === "gentle-agents.result");
+	assert.equal(results.length, 1, "the re-check delivers the re-queued completion");
+	assert.match(String(results[0]!.message.content), /Requeued answer\./);
+	await fire("session_shutdown", ctx);
+});
+
 test("no held-only re-check is armed when nothing is held", async () => {
 	const { fire, ctx, notify, setIdle, timers } = await orchestratorHost();
 	setIdle(false);

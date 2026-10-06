@@ -62,3 +62,7 @@ The textual rebase of #1574 applied cleanly but kept `sendMessage(notice, { stee
 - cf3012f7 split the idle wake: Claude Bridge keeps a user wake through the prompt lifecycle; native providers get a hidden `gentle-agents.wake` custom-message turn. The real-host harness now registers the faux provider as `claude-bridge`.
 - The bridge wake text is persisted per session (`gentle-agents.wake-identity`) and validated against `PARENT_WAKE_TEXT` on restore, so the wake text is no longer changed here and the idle test no longer asserts it.
 - cf3012f7 also moved the `restoreSessionHistory` session check inside its try; main's version replaces this branch's guard.
+
+### Merge with main ed536d4f (#1833)
+- #1833 re-queues a completion whose forward throws and gives an idle parent a bounded retry; child messages and held session messages stay at most once, as on main.
+- The held-only re-check reads `completionsMaybePending`, which the flush clears before forwarding. A re-queued completion now sets it again, so a later hold still arms the re-check. Test: `a completion re-queued after a failed forward still arms the held-only re-check` (red without the line: no re-check armed).

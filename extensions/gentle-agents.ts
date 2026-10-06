@@ -1047,6 +1047,8 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 				// lose the completion: it waits for the next boundary instead, and
 				// an idle parent, which has none coming, gets a bounded retry.
 				completions.requeue(entry);
+				// Still pending, so a later held-only re-check must see it.
+				completionsMaybePending = true;
 				if (route === "idle") armDeliveryRetry();
 			}
 		}
