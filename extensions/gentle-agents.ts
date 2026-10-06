@@ -793,7 +793,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		sendToParent(
 			{
 				customType: AGENTS_STALE_NOTICE_TYPE,
-				content: `Subagent ${task.agent} (task ${task.id}, "${task.label}") ${outcome} ${ageSeconds}s ago and its result was not read yet. Call subagent_result or subagent_status with task_id ${task.id}.`,
+				content: `Subagent ${task.agent} (task ${task.id}, "${task.label}") ${outcome} ${ageSeconds}s ago and its result was not read yet. Call subagent_result with task_id ${task.id}.`,
 				display: false,
 			},
 			route,

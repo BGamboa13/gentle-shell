@@ -4591,7 +4591,9 @@ test("a completion held past the stale window becomes transcript-only content an
 	assert.deepEqual(notices[0]!.options, { deliverAs: "steer", triggerTurn: true });
 	assert.equal(notices[0]!.message.display, false);
 	assert.match(String(notices[0]!.message.content), new RegExp(id));
-	assert.match(String(notices[0]!.message.content), /subagent_result/);
+	assert.match(String(notices[0]!.message.content), new RegExp(`Call subagent_result with task_id ${id}\\.$`));
+	// subagent_status returns metadata, not the report, so following it would leave the result unread.
+	assert.doesNotMatch(String(notices[0]!.message.content), /subagent_status/, "the notice points only at the tool that returns the report");
 	assert.doesNotMatch(String(notices[0]!.message.content), /Late answer\./, "the notice never carries the report");
 	await fire("agent_end", ctx);
 	await fire("agent_settled", ctx);
