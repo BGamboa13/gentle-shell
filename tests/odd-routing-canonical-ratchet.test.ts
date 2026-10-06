@@ -84,24 +84,49 @@ const ANCHORS: readonly RoutingAnchor[] = [
 		],
 	},
 	{
-		label: "mapping trigger at the evidence budget",
-		canonical: "**Mapping trigger:** when evidence exceeds the inline batch budget",
-		// gentle-ai#5139 replaced the canonical 4-file count with the measured
-		// evidence-budget rule the local mirrors already carried.
+		label: "mapping trigger when understanding exceeds the evidence budget",
+		canonical: "**Mapping trigger:** when understanding exceeds the inline batch budget",
+		// gentle-ai#5139 replaced the 4-file count with the evidence budget;
+		// gentle-ai#5218 scoped it to understanding (gentle-shell#1494).
 		mirrors: [
 			{ surface: DELEGATION, includes: "**Mapping trigger (Evidence-budget rule):** read inline only when the evidence fits one parallel batch of at most 3 calls" },
 			{ surface: CORE, includes: "**Evidence-budget rule** — understanding needs more than one read batch" },
 		],
 	},
 	{
-		label: "writer trigger at 2 or more non-trivial files",
-		canonical: "**Writer trigger:** when implementation touches 2 or more non-trivial files",
-		// Gentle Shell intentionally leads the canon here: task size, not file
-		// count, fires the writer (gentle-shell#1494). The canonical anchor stays
-		// until gentle-ai follows.
+		label: "writer trigger fires only for a large task, never by file count",
+		canonical: "**Writer trigger:** a large task delegates one bounded writer per task; file count never fires this trigger",
+		// Gentle Shell intentionally leads the canon here (gentle-shell#1731): the
+		// writer fires on named reasons (parallelism, context), never on size
+		// alone; T24 turned the price-ratio reason off. The canon port is G1 in
+		// odd/tasks/delegate-for-reason.md.
 		mirrors: [
-			{ surface: DELEGATION, includes: "**Writer trigger (Writer rule):** a large task delegates one bounded writer per task" },
-			{ surface: CORE, includes: "**Writer rule** — large task → one bounded `gentle-ai-worker` per task" },
+			{ surface: DELEGATION, includes: "**Writer trigger (Writer rule):** a large task alone never delegates, and file count never fires this trigger" },
+			{ surface: CORE, includes: "**Writer rule** — never by file count or a large task alone" },
+		],
+	},
+	{
+		label: "task size decides the route (gentle-shell#1494)",
+		canonical: "### Task Size",
+		mirrors: [
+			{ surface: CORE, includes: "## Task Size" },
+			{ surface: EXTENSION, includes: "Size the task by the orchestrator's Task Size section" },
+		],
+	},
+	{
+		label: "verification trigger is reserved for high risk",
+		canonical: "**Verification trigger:** a high-risk change gets an independent verifier",
+		mirrors: [
+			{ surface: CORE, includes: "**Verification rule** — high risk → independent `gentle-ai-verify`" },
+			{ surface: DELEGATION, includes: "a high-risk change (Task Size) gets an independent `gentle-ai-verify` run" },
+		],
+	},
+	{
+		label: "tracking trigger is reserved for large tasks",
+		canonical: "**Tracking trigger:** a large task gets the feature document",
+		mirrors: [
+			{ surface: CORE, includes: "**Track** — large task → feature document" },
+			{ surface: DELEGATION, includes: "**Track:** a large task gets the feature document" },
 		],
 	},
 	{
@@ -223,16 +248,6 @@ test("the pi mirror surfaces carry every mapped mandatory-delegation anchor", ()
 			);
 		}
 	}
-});
-
-// gentle-shell#1494 tripwire: the writer and mapping anchors keep the old
-// canonical text only while Gentle Shell leads the canon. Once the regenerated
-// fixture carries the Task Size section (gentle-ai#5217), restore real parity.
-test("the writer anchor's divergence expires when the canon gains Task Size", () => {
-	assert.ok(
-		!fixtureBody().includes("### Task Size"),
-		"the canon now carries Task Size (gentle-ai#5217): replace the file-count writer and mapping anchors with the canonical Task Size wording",
-	);
 });
 
 test("the always-on core prompt carries the condensed incident and verification trigger rows", () => {
