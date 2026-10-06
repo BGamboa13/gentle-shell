@@ -40,7 +40,7 @@ test("applicability, fallback and honest evidence flow through ODD actors", () =
 		assert.match(text, /ordinary functional or structural verification/i, `${actor} must verify fallbacks`);
 	}
 	assert.match(support, /no meaningful RED/);
-	assert.match(worker, /RED — add the smallest behavior-level test and capture its intended observed failure/);
+	assert.match(worker, /RED — add behavior-level tests for each requested rule and capture their intended observed failure/);
 	assert.match(verifier, /execute only exact test, build, lint, or spec example commands explicitly authorized by the parent/);
 	assert.match(verifier, /Do not infer RED from a test file existing/);
 });
@@ -65,4 +65,12 @@ test("retired SDD routes and assets are absent while ODD entry and generic worke
 		"assets/chains/sdd-verify.chain.md",
 	]) assert.equal(existsSync(new URL(`../${path}`, import.meta.url)), false, path);
 	assert.doesNotMatch(core + delegation + read("extensions/gentle-ai.ts"), /(?:\/sdd-(?:init|explore|status|apply|verify|archive)|sdd-full\.chain|sdd-orchestrator-workflow\.md)/);
+});
+
+test("ODD projects blocked and dropped tasks to the todo list on a change of plan (#1814, #1820)", () => {
+	const memory = read("assets/orchestrator-memory.md");
+	assert.match(memory, /When a change of direction makes tasks obsolete, mark them `dropped` in `## Tasks`, append the reason to `## Log`, and project them as `dropped` in the same turn/);
+	assert.match(memory, /A dropped task never satisfies the tasks that depended on it/);
+	assert.match(memory, /mark it `blocked` with a note naming what it waits for and the observable condition that unblocks it/);
+	assert.match(memory, /A prerequisite inside the list is ordering, not blocking/);
 });

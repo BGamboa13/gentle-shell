@@ -52,6 +52,7 @@ import { installPackageAssets, getPackageAssetOwner, hasPackageAssetOwnerInstall
 import {
 	THINKING_LEVELS,
 	normalizeModelConfig,
+	isThinkingLevel,
 	normalizeModelId,
 	normalizeRoutingEntry,
 	readSavedModelConfig as readModelRoutingAuthority,
@@ -371,6 +372,7 @@ type BackgroundSubagentsCapability = "ready" | "absent";
 interface BackgroundSubagentsRendering {
 	policy: BackgroundSubagentsPolicy;
 	capability: BackgroundSubagentsCapability;
+	singleShot?: boolean;
 }
 
 const DEFAULT_BACKGROUND_SUBAGENTS_RENDERING: BackgroundSubagentsRendering = {
@@ -714,7 +716,15 @@ function resolveBackgroundSubagentsCapability(
 function renderBackgroundSubagentsStatusLine(
 	background: BackgroundSubagentsRendering,
 ): string {
+	if (background.singleShot) return `Background subagent policy: off (single-shot mode)`;
 	return `Background subagent policy: ${background.policy} (capability: ${background.capability})`;
+}
+
+// gentle-shell#1731 T27: `pi -p` and `pi --mode json` run one prompt and then
+// dispose the runtime, so background results can never arrive. Mirrors
+// isSingleShotMode in extensions/gentle-agents.ts, which rejects the launch.
+function isSingleShotHostMode(mode: string | undefined): boolean {
+	return mode === "print" || mode === "json";
 }
 
 /**
@@ -1123,12 +1133,14 @@ function getOrchestratorPrompt(
 	cwd: string = process.cwd(),
 	activeTools?: readonly string[],
 	rddStatusLine: string = renderRddStatusLine(undefined),
+	hostMode?: string,
 ): string {
 	const background: BackgroundSubagentsRendering = {
 		policy: loadBackgroundSubagentsPolicy(cwd),
 		capability: resolveBackgroundSubagentsCapability(cwd, activeTools),
+		singleShot: isSingleShotHostMode(hostMode),
 	};
-	const cacheKey = `${background.policy}:${background.capability}:${rddStatusLine}`;
+	const cacheKey = `${background.policy}:${background.capability}:${background.singleShot}:${rddStatusLine}`;
 	let prompt = orchestratorPromptCache.get(cacheKey);
 	if (prompt === undefined) {
 		prompt = renderOrchestratorPrompt(ASSETS_DIR, background, rddStatusLine);
@@ -1247,6 +1259,7 @@ function buildGentlePrompt(
 	cwd: string = process.cwd(),
 	activeTools?: readonly string[],
 	rddStatusLine: string = renderRddStatusLine(undefined),
+	hostMode?: string,
 ): string {
 	const personaPrompt =
 		persona === "neutral" ? NEUTRAL_PERSONA_PROMPT : GENTLEMAN_PERSONA_PROMPT;
@@ -1273,13 +1286,13 @@ ${languageBoundary}
 
 Default workflow: Organic Driven Development (MANDATORY)
 Organic Driven Development (ODD) is the predefined workflow of this orchestrator. Every request enters it, without the user asking for a workflow, a plan, or task tracking. Never describe this workflow only when asked about it: run it. Run these steps in this order on every request:
-1. **Authorize.** Investigation, explanation, review, comparison, and proposal-only requests stay read-only: no writer, apply, or implementation artifacts. Ambiguous or conditional change intent gets one clarification; stop and wait.
-2. **Explore.** Explore existing code and requirements first, proportionately to the request, before proposing or writing anything.
+1. **Authorize.** Investigation, explanation, review, comparison, and proposal-only requests stay read-only: no writer, apply, or implementation artifacts. Ambiguous or conditional change intent (unclear whether a change is authorized at all) gets one clarification; stop and wait. A user saying they may stop you or resume later asks for notes and separate commits, not a stop.
+2. **Explore.** Explore existing code and requirements first, proportionately to the request, before proposing or writing anything. Do not delegate exploration of files you will read anyway to work inline; explore only for a map you need to decide or route.
 3. **Resolve uncertainty.** Recommend optional research only for a named uncertainty; ask one focused user question only for a real unresolved product decision, then stop and wait; use at most one scoped read-only assumption challenge for a high-consequence unproven premise.
 4. **Classify.** Size the task by the orchestrator's Task Size section: small when understood, risk is contained, and the work could be resumed from the original request and \`git diff\` alone; large only when that resume test fails. Never classify by counting files, commands, tests, fixes, or a requested todo list. Small work stays inline and creates no durable task artifacts.
 5. **Track before the first write.** For large authorized implementation, create \`odd/tasks/<feature-name>.md\` and its Engram mirror \`odd/<feature-name>/tasks\` automatically, then create or rebuild the visible \`todo\` list from the reconciled feature tasks, all before the first source write and without asking permission for tasks or storage. Tell the user in one line which feature document was created and how many tasks it holds. The document is the specification subagents read, in this order: a two- or three-line header; \`## Specs\` with numbered \`S#\` that quote the user's exact strings, error messages, and examples verbatim, never summarized and never adding unrequested requirements; \`## Tasks\` with one line per task (ID, linked \`S#\`, route, commit); \`## Log\` last, where \`L1\` is the user's original request verbatim and later user corrections, evidence, and decisions are appended. A requirement change appends its verbatim Log entry, rewrites only the affected \`S#\`, and reopens only its task.
-6. **Implement task by task.** Hand off by reference, never by paraphrase: name the document, task, and specs (for example \`Spec: odd/tasks/<feature>.md, T2, S3-S4\`), tell workers to read until \`## Log\`, and ask which \`S#\` were covered. Without a feature document, include the user's request verbatim. Verify reads the whole document, runs the spec's examples the parent authorized, against isolated state when they mutate data, and returns a verdict per \`S#\`. When the user reports a failure, reproduce it before deciding it already works. Route each task through the orchestrator's Mechanisms, honoring its mandatory delegation triggers, with applicable test-first development and checks. These triggers are mandatory, not advisory: executing past a fired trigger inline is a routing defect even if the work succeeds. Check an item off only after its outcome and checks were observed; update the file, mirror, and visible \`todo\` projection after every task transition and material plan change. Every tracked task closes with at least one work-unit commit on the feature branch, branch first when on the default branch, with tests and docs alongside the behavior, using a Conventional Commit message; record the commit identity in the feature document as evidence. Work-unit commits on the feature branch are part of authorized large ODD implementation; push, pull request creation, and merge remain the user's decisions.
-7. **Close.** Report the verified outcome, every failed, skipped, or pending check, and the next step. The native review candidate is a work-unit commit or a PR slice, never a TODO checkbox and never the accumulated feature branch; native review runs only under the user-owned RDD switch.
+6. **Implement task by task.** Hand off by reference, never by paraphrase: name the document, task, and specs (for example \`Spec: odd/tasks/<feature>.md, T2, S3-S4\`), tell workers to read until \`## Log\`, and ask which \`S#\` were covered. Without a feature document, include the user's request verbatim. Verify reads the whole document, runs the spec's examples the parent authorized, against isolated state when they mutate data, and returns a verdict per \`S#\`. When the user reports a failure, reproduce it before deciding it already works. Each test asserts every observable effect of the rule it covers (exit code, exact stdout and stderr, and that rejected input leaves stored data and counters unchanged), covers the cases the rule itself names (its examples, boundaries, and errors), and checks through the public interface, never internal storage. When you add or change a command, option, or message, update the help text and docs that describe it. Route each task through the orchestrator's Mechanisms, honoring its mandatory delegation triggers, with applicable test-first development and checks. These triggers are mandatory, not advisory: executing past a fired trigger inline is a routing defect even if the work succeeds. Check an item off only after its outcome and checks were observed; update the file, mirror, and visible \`todo\` projection after every task transition and material plan change. Every tracked task closes with at least one work-unit commit on the feature branch, branch first when on the default branch, with tests and docs alongside the behavior, using a Conventional Commit message; record the commit identity in the feature document as evidence. Work-unit commits on the feature branch are part of authorized large ODD implementation; push, pull request creation, and merge remain the user's decisions.
+7. **Close.** Report the verified outcome, every failed, skipped, or pending check, and the next step. Before writing \`Risk: none\`, check whether your diff changes code that existing behavior the request did not mention also uses (shared options, parsers, helpers); if it does, that is item 3. Never end with a tracked task pending unless you quote the user's explicit stop. An applicable quick check runs once; an unavailable verifier or subagent is reported as unavailable, never retried or escalated into extra ceremony. Partial, blocked, unavailable, or exhausted proof becomes one **Needs your decision** result naming the open blockers or missing proof, never more verification; that result is a valid stop, hedged wording is not. The native review candidate is a work-unit commit or a PR slice, never a TODO checkbox and never the accumulated feature branch; native review runs only under the user-owned RDD switch.
 Phase reporting: the Gentle Shell prompt label is inferred automatically from the primary session's tool activity (reads show \`exploring\`, edits \`implementing\`, test runs \`checking\`, user questions \`deciding\`). When the \`gentle_odd_phase\` tool is available, use it to refine that label with phases tools cannot show (\`authorizing\`, \`researching\`, \`deciding\`, \`closing\`): call \`gentle_odd_phase\` only when the primary session's ODD phase actually changes, never per tool call or on a fixed cadence, and never from a subagent. It drives the Gentle Shell prompt label only.
 Resume an interrupted feature with \`mem_context\`, then project- and feature-scoped \`mem_search\`, then \`mem_get_observation\` for the full document, then the task file itself; reconcile before continuing the next unfinished task. Detail for steps 3–7: \`orchestrator-delegation.md\` and \`orchestrator-memory.md\`.
 
@@ -1288,12 +1301,12 @@ Harness principles:
 - Organic Driven Development (ODD) is the predefined workflow for every request: authorize, explore, resolve uncertainty, classify, track large work before the first write, implement task by task with proportionate checks, close each tracked task with a work-unit commit, and close.
 - Clarify scope, constraints, acceptance criteria, and non-goals before implementation.
 - Use subagents when available for exploration, planning, implementation, and review, while keeping one parent session responsible for orchestration.
-- Keep writes single-threaded unless the user explicitly approves parallel write isolation.
-- For behavior changes with applicable runnable deterministic tests and a clear expected outcome, use test-first by default: observe RED, GREEN, then refactor with focused checks. Test presence alone does not establish applicability; no chat or TUI toggle activates it. For passive documentation, non-testable changes, an unavailable runner, or no meaningful RED, explain why and run proportionate ordinary functional or structural verification. Never invent lifecycle evidence or skip checks. Follow orchestrator-delegation.md for ODD forwarding and evidence.
+- Parallel writers only with disjoint Allowed edit surfaces (runtime-enforced) or isolated worktrees.
+- For behavior changes with applicable runnable deterministic tests and a clear expected outcome, use test-first by default: observe RED, GREEN, then refactor with focused checks. Write one RED test per requested rule. For every existing command or option the change touches, add one test proving its previous behavior still holds; add no other cases. An existing behavior counts as touched when it shares the code you changed (options, parsers, helpers, validation). Test presence alone does not establish applicability; no chat or TUI toggle activates it. For passive documentation, non-testable changes, an unavailable runner, or no meaningful RED, explain why and run proportionate ordinary functional or structural verification. Never invent lifecycle evidence or skip checks. Follow orchestrator-delegation.md for ODD forwarding and evidence.
 - Protect the human reviewer: avoid oversized changes, surface review workload risk, and ask before turning one task into a large multi-area change.
 - Never claim persistent memory is available because of this package. Memory is provided by separate packages or MCP tools when installed and callable.
 
-${getOrchestratorPrompt(cwd, activeTools, rddStatusLine)}`;
+${getOrchestratorPrompt(cwd, activeTools, rddStatusLine, hostMode)}`;
 }
 
 // Matches `git [global-flags] push` — tolerates flags like -C /repo or --work-tree=/tmp
@@ -3944,7 +3957,7 @@ class ProfilesPanel implements OverlayComponent {
 	private refreshListItems(): void {
 		// Keep the list instance (and its pointer observer) alive while refreshing the
 		// mutable item records that NativeChoiceList already holds by reference.
-		for (const item of buildProfileListItems(this.file, evaluateProfilePin(this.pinStatus, this.file.profiles).winner?.profile)) {
+		for (const item of buildProfileListItems(this.file, evaluateProfilePin(this.pinStatus, this.file.profiles).winner?.profile, this.sessionBoundName)) {
 			const current = this.listItems.find((candidate) => candidate.id === item.id);
 			if (current) Object.assign(current, item);
 		}
@@ -4166,7 +4179,7 @@ function reportProfilesDrops(ctx: ExtensionContext, path: string, drops: Profile
 }
 
 /** Pi's own live-session controls: the ExtensionAPI's setModel/setThinkingLevel. */
-type LiveSession = Pick<ExtensionAPI, "setModel" | "setThinkingLevel">;
+type LiveSession = Pick<ExtensionAPI, "setModel" | "setThinkingLevel" | "getThinkingLevel">;
 
 /**
  * Switch the running session to the profile's orchestrator. `settings.json`
@@ -4348,19 +4361,58 @@ async function runProfilesPanelAction(
 				const orchestratorEffects = orchestratorEntry !== undefined
 					? ", set the configured orchestrator entry in settings.json, and attempt to switch this session to that orchestrator model"
 					: "";
-				let confirmMessage: string;
-				if (savedRouting.status !== "valid") {
-					const modelsPath = sanitizeTerminalText(modelConfigPath(ctx.cwd));
-					confirmMessage = `Profile "${result.name}" has agent routing entries, but the current global routing in ${modelsPath} could not be read, so existing routes are not listed. Applying it will replace global routing in ${modelsPath} with this profile's routes, so every existing agent route may be replaced or cleared back to inherit${orchestratorEffects}. Continue?`;
+				// A profile whose agent routes already match the effective current routing
+				// and that moves no orchestrator changes nothing: re-selecting the active
+				// profile or verifying state would otherwise train users to approve a
+				// dialog without reading it, weakening the guard on the destructive cases
+				// (issue #1683). Any routing change, any orchestrator change, or an
+				// unreadable routing authority (the diff above cannot prove a no-op)
+				// keeps the confirmation exactly as #1349/#1384 defined it.
+				// `applyOrchestratorSettings` treats an entry without a model as "leave
+				// settings.json alone", so such an entry is a no-op too, not a change.
+				// The live session is a fourth surface: applying re-asserts the profile's
+				// orchestrator on it, so a session already moved to another model or
+				// thinking level mid-session is a real change the user must approve,
+				// even when settings.json and the profile agree.
+				const liveOrchestrator = (() => {
+					if (ctx.model === undefined || typeof ctx.model.provider !== "string" || typeof ctx.model.id !== "string") return undefined;
+					let thinking: unknown;
+					try { thinking = live.getThinkingLevel(); } catch { return undefined; }
+					return { model: `${ctx.model.provider}/${ctx.model.id}`, thinking: isThinkingLevel(thinking) ? thinking : undefined };
+				})();
+				const orchestratorUnchanged = (orchestratorEntry === undefined || orchestratorEntry.model === undefined) || (() => {
+					const current = readOrchestratorSettings(orchestratorSettingsPath());
+					// An invalid stored defaultThinkingLevel is dropped from the entry but
+					// applyOrchestratorSettings would delete the key, so the file would
+					// change: a no-op cannot be proven and the dialog must stay.
+					if (current.status === "valid" && "defaultThinkingLevel" in current.value && current.entry?.thinking === undefined) return false;
+					return current.status === "valid" && current.entry !== undefined
+						&& current.entry.model === orchestratorEntry.model
+						&& current.entry.thinking === orchestratorEntry.thinking
+						&& liveOrchestrator !== undefined
+						&& liveOrchestrator.model === orchestratorEntry.model
+						&& liveOrchestrator.thinking === orchestratorEntry.thinking;
+				})();
+				if (savedRouting.status === "valid" && replacedRoutes.length === 0 && clearedRoutes.length === 0 && addedRoutes.length === 0 && orchestratorUnchanged) {
+					ctx.ui.notify(
+						`Profile "${result.name}" already matches the current global routing${orchestratorEntry !== undefined ? " and orchestrator" : ""}; applying it changed nothing.`,
+						"info",
+					);
 				} else {
-					const changes = [...replacedRoutes, ...clearedRoutes, ...addedRoutes];
-					const changeSummary = changes.length > 0
-						? changes.join("; ")
-						: "its agent routes already match the current global routing";
-					confirmMessage = `Profile "${result.name}" has agent routing entries. Applying it will replace global routing in ${sanitizeTerminalText(modelConfigPath(ctx.cwd))} with this profile's routes: ${changeSummary}${orchestratorEffects}. Continue?`;
+					let confirmMessage: string;
+					if (savedRouting.status !== "valid") {
+						const modelsPath = sanitizeTerminalText(modelConfigPath(ctx.cwd));
+						confirmMessage = `Profile "${result.name}" has agent routing entries, but the current global routing in ${modelsPath} could not be read, so existing routes are not listed. Applying it will replace global routing in ${modelsPath} with this profile's routes, so every existing agent route may be replaced or cleared back to inherit${orchestratorEffects}. Continue?`;
+					} else {
+						const changes = [...replacedRoutes, ...clearedRoutes, ...addedRoutes];
+						const changeSummary = changes.length > 0
+							? changes.join("; ")
+							: "its agent routes already match the current global routing";
+						confirmMessage = `Profile "${result.name}" has agent routing entries. Applying it will replace global routing in ${sanitizeTerminalText(modelConfigPath(ctx.cwd))} with this profile's routes: ${changeSummary}${orchestratorEffects}. Continue?`;
+					}
+					const approved = await ctx.ui.confirm(`Apply profile "${result.name}"?`, confirmMessage);
+					if (!approved) return file;
 				}
-				const approved = await ctx.ui.confirm(`Apply profile "${result.name}"?`, confirmMessage);
-				if (!approved) return file;
 			}
 			// Applying spans three files — the store, models.json, and Pi's global
 			// settings.json — and there is no cross-file rename, so order the writes to
@@ -4784,7 +4836,10 @@ async function handleProfilesCommand(ctx: ExtensionContext, live: LiveSession): 
 			file,
 			name,
 			profileSnapshotFrom(
-				readEffectiveModelConfig(ctx.cwd),
+				// The snapshot captures the same routing the panel shows as current,
+				// so a session binding outranks the shared layers here too.
+				readSessionProfileBinding(ctx.sessionManager?.getSessionId?.())?.modelProfiles
+					?? readEffectiveModelConfig(ctx.cwd),
 				readOrchestratorSettings(orchestratorSettingsPath()),
 			),
 		);
@@ -4794,10 +4849,17 @@ async function handleProfilesCommand(ctx: ExtensionContext, live: LiveSession): 
 	};
 	let selectedName: string | undefined;
 	const sessionBoundName = () => readSessionProfileBinding(ctx.sessionManager?.getSessionId?.())?.name;
+	// The panel's "Current routing (effective)" table shows what this session's
+	// launches resolve right now, and a session binding outranks every shared
+	// layer, so a bound session reads its snapshot as the current routing while an
+	// unbound session keeps reading the effective config exactly as before.
+	const currentRoutingForPanel = async () =>
+		readSessionProfileBinding(ctx.sessionManager?.getSessionId?.())?.modelProfiles
+		?? await readEffectiveModelConfigAsync(ctx.cwd);
 	let result = await showProfilesPanel(
 		ctx,
 		file,
-		await readEffectiveModelConfigAsync(ctx.cwd),
+		await currentRoutingForPanel(),
 		selectedName,
 		saveSnapshot,
 		undefined,
@@ -4810,7 +4872,7 @@ async function handleProfilesCommand(ctx: ExtensionContext, live: LiveSession): 
 		result = await showProfilesPanel(
 			ctx,
 			file,
-			await readEffectiveModelConfigAsync(ctx.cwd),
+			await currentRoutingForPanel(),
 			selectedName,
 			saveSnapshot,
 			report.status,
@@ -4930,10 +4992,11 @@ const REVIEW_CONTROLLER_PARAMETER_FIELDS = {
 	},
 } as const;
 
-// Providers such as non-strict Anthropic emit only root properties/required.
-// Keep the full declaration here and operation constraints in runtime branches.
-// The nullable root shell prevents Pi from deleting an optional supplied null;
-// both the branches below and the facade reject it, so it never becomes omitted.
+// Root-level union combinators (anyOf/oneOf/allOf) are forbidden by the Anthropic
+// tool definition spec and cause Claude Code/Agent SDK to drop the tool (#1698).
+// The root schema is a plain object; the nullable root shell prevents Pi from
+// deleting an optional supplied null, while runtime branches in the facade
+// enforce that null and non-START/ASSESS objects are rejected fail-closed.
 const REVIEW_CONTROLLER_PARAMETERS = {
 	...REVIEW_CONTROLLER_PARAMETER_FIELDS,
 	properties: {
@@ -4943,24 +5006,6 @@ const REVIEW_CONTROLLER_PARAMETERS = {
 			description: `${REVIEW_CONTROLLER_PARAMETER_FIELDS.properties.input.description} Null is invalid; omit input when optional.`,
 		},
 	},
-	anyOf: [
-		{
-			...REVIEW_CONTROLLER_PARAMETER_FIELDS,
-			properties: {
-				...REVIEW_CONTROLLER_PARAMETER_FIELDS.properties,
-				operation: { ...REVIEW_CONTROLLER_PARAMETER_FIELDS.properties.operation, enum: ["start", "assess"] },
-				input: { ...REVIEW_JSON_ARGUMENT, description: REVIEW_CONTROLLER_PARAMETER_FIELDS.properties.input.description },
-			},
-		},
-		{
-			...REVIEW_CONTROLLER_PARAMETER_FIELDS,
-			properties: {
-				...REVIEW_CONTROLLER_PARAMETER_FIELDS.properties,
-				operation: { ...REVIEW_CONTROLLER_PARAMETER_FIELDS.properties.operation, enum: Object.values(REVIEW_CONTROLLER_OPERATION).filter((operation) => operation !== "start" && operation !== "assess") },
-				input: { ...REVIEW_JSON_STRING, description: "Serialized JSON object string only; objects are accepted only by START/ASSESS." },
-			},
-		},
-	],
 } as const;
 
 const REVIEW_CAPTURE_PARAMETERS = {
@@ -7141,6 +7186,12 @@ function mapLastEventClosure(
 			...(closure.requestHash === undefined ? {} : { request_hash: closure.requestHash }),
 			...(closure.correctionLines === undefined ? {} : { correction_lines: closure.correctionLines }),
 			...(closure.advisoryFindings === undefined ? {} : { advisory_findings: closure.advisoryFindings }),
+			...(closure.escalation === undefined ? {} : { escalation: {
+				cause: closure.escalation.cause,
+				finding_ids: closure.escalation.findingIds,
+				...(closure.escalation.refuterOutcomes === undefined ? {} : { refuter_outcomes: closure.escalation.refuterOutcomes.map(({ findingId, ...outcome }) => ({ finding_id: findingId, ...outcome })) }),
+			} }),
+			...(closure.targetedValidatorEvidence === undefined ? {} : { targeted_validator_evidence: closure.targetedValidatorEvidence.raw }),
 			...(closure.statusContinuation === undefined ? {} : { status_continuation: closure.statusContinuation.raw }),
 			// The host has to see the acknowledgement to run it: approval now
 			// waits for that exact invocation instead of burning on its own, so
@@ -9756,6 +9807,35 @@ function createGentleAiExtensionForTesting(
 		reminderEpoch += 1;
 		unbindPreparation?.();
 		reminderManager = ctx.sessionManager;
+		// gentle-shell#1690: a delegated child runs in the parent's resolved
+		// worktree. Repository preparation, review negotiation, asset install and
+		// model config belong to the parent session and write shared state. The
+		// standing review grant is host-only (a child never captures an identity),
+		// so revoke/refresh have nothing to act on; the child relay is load-time.
+		// Only that parent-owned work is skipped: the session-local resets above,
+		// the dev-binary notice, and any step added after this call, still run in
+		// children.
+		if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD !== "1") await startParentSession(event, ctx);
+		else await surfaceDevBinaryOverride(ctx);
+	});
+
+	// Loud, every session: an active dev-binary override means this session
+	// runs an unpinned gentle-ai. One visible startup notice: the gentle-shell
+	// 🌹 card owns the announcement when it can render (shell enabled with UI);
+	// this toast is only the fallback for when the card is unavailable. The
+	// hasUI guard stays: headless contexts have no toast to show.
+	const surfaceDevBinaryOverride = async (ctx: ExtensionContext): Promise<void> => {
+		const devBinaryToastFallback = ctx.hasUI && !shellEnabled();
+		try {
+			const devBinary = await describeDevBinaryOverride();
+			if (devBinaryToastFallback && devBinary.state === "active") ctx.ui.notify(devBinary.line, "warning");
+			if (devBinaryToastFallback && devBinary.state === "invalid") ctx.ui.notify(devBinary.line, "error");
+		} catch (error) {
+			if (ctx.hasUI) ctx.ui.notify(`Gentle AI dev binary override check failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		}
+	};
+
+	const startParentSession = async (event: unknown, ctx: ExtensionContext): Promise<void> => {
 		const epoch = reminderEpoch;
 		const manager = ctx.sessionManager;
 		const originalCwd = manager?.getCwd?.() ?? ctx.cwd;
@@ -9776,19 +9856,7 @@ function createGentleAiExtensionForTesting(
 		const reason = (event as { reason?: unknown }).reason;
 		if (reason !== "reload") revokeCurrentReviewSessionPermission(ctx);
 		await refreshReviewSessionPermissionStatus(ctx);
-		// Loud, every session: an active dev-binary override means this session
-		// runs an unpinned gentle-ai. One visible startup notice: the gentle-shell
-		// 🌹 card owns the announcement when it can render (shell enabled with UI);
-		// this toast is only the fallback for when the card is unavailable. The
-		// hasUI guard stays: headless contexts have no toast to show.
-		const devBinaryToastFallback = ctx.hasUI && !shellEnabled();
-		try {
-			const devBinary = await describeDevBinaryOverride();
-			if (devBinaryToastFallback && devBinary.state === "active") ctx.ui.notify(devBinary.line, "warning");
-			if (devBinaryToastFallback && devBinary.state === "invalid") ctx.ui.notify(devBinary.line, "error");
-		} catch (error) {
-			if (ctx.hasUI) ctx.ui.notify(`Gentle AI dev binary override check failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
-		}
+		await surfaceDevBinaryOverride(ctx);
 		try {
 			const installResult = installPackageAssets(ctx.cwd, true, ["delegation", "review"]);
 			migrateLegacyProjectModelOverrides(ctx.cwd);
@@ -9824,7 +9892,7 @@ function createGentleAiExtensionForTesting(
 		} catch {
 			// Startup negotiation is best-effort only; never surface or throw.
 		}
-	});
+	};
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		const isNamedAgent = isNamedAgentStartEvent(event);
@@ -9873,6 +9941,7 @@ function createGentleAiExtensionForTesting(
 					ctx.cwd,
 					readActiveToolNames(pi),
 					rddStatusLine,
+					ctx.mode,
 				)}`;
 		// gentle-pi#560 / gentle-ai#4056, #4057: inject the mirrored provider
 		// contract bundle's review execution contract for the primary session
@@ -9944,7 +10013,7 @@ function createGentleAiExtensionForTesting(
 			// Persist the observed own write before any await. Preparation is not
 			// mutation evidence, and cannot invent a pre-write Changes baseline.
 			if (root) recordReviewMutation(pi, ctx.sessionManager, root, { source: "direct", toolName: event.toolName, toolCallId: event.toolCallId, ...directWriterProfile(pi, ctx) });
-			if (prospectiveRoot && !resolveSessionWorktree(ctx.cwd, ctx.cwd)) await prepareBoundSessionRepository(ctx.sessionManager, ctx.sessionManager.getCwd?.() ?? ctx.cwd, ctx.signal);
+			if (permissionEnvironment.GENTLE_PI_AGENTS_CHILD !== "1" && prospectiveRoot && !resolveSessionWorktree(ctx.cwd, ctx.cwd)) await prepareBoundSessionRepository(ctx.sessionManager, ctx.sessionManager.getCwd?.() ?? ctx.cwd, ctx.signal);
 		} catch { /* Preparation and receipt persistence cannot change a successful tool result. */ }
 	});
 
