@@ -1,7 +1,7 @@
 # Prompt lifecycle: remaining delivery paths after #1631
 
 ## Objective
-Every model-visible message Gentle Agents hands to a parent session starts its turn through Pi's prompt lifecycle (`before_agent_start`), never through a direct `triggerTurn` run, in every host state. Held content reaches the parent without waiting for an unrelated user prompt, unless the session changes first (see the T1 residual below). Proven on the real Pi host, not only on the fake.
+For the Claude Bridge selection, every model-visible message Gentle Agents hands to a parent session starts its turn through Pi's prompt lifecycle (`before_agent_start`), never through a direct `triggerTurn` run, in every host state. Held content reaches the parent without waiting for an unrelated user prompt, unless the session changes first (see the T1 residual below). Proven on the real Pi host, not only on the fake.
 
 Scope after merging main 2fb7700a: cf3012f7 lets native providers continue through a hidden `triggerTurn` wake by design, so the prompt-lifecycle guarantee applies to the Claude Bridge selection; holds apply to every provider.
 
